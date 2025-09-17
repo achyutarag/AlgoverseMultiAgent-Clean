@@ -1,103 +1,101 @@
-Question,Prediction,Reference,ExactMatch,F1Score,,,,
-Who was the man behind The Chipmunks?,david seville,david seville,1,1,,,,
-Which Lloyd Webber musical premiered in the US on 10th December 1993?,sunset boulevard,sunset boulevard,1,1,,,,
-Who was the next British Prime Minister after Arthur Balfour?,campbellbannerman,henry campbell bannerman,0,0,,,,
-Who had a 70s No 1 hit with Kiss You All Over?,exile,exiles,0,0,,,,
-What claimed the life of singer Kathleen Ferrier?,cancer,aids related cancer,0,0.5,,,,
-Rita Coolidge sang the title song for which Bond film?,octopussy,list of bond girls in octopussy,0,0.2857142857142857,,,,
-What was the last US state to reintroduce alcohol after prohibition?,utah,history of mining in utah,0,0.33333333333333337,,,,
-Which actress was voted Miss Greenwich Village in 1942?,lauren bacall,lauren becall,0,0.5,,,,
-What is the Japanese share index called?,nikkei,nikkei disambiguation,0,0.6666666666666666,,,,
-What was the name of Michael Jackson's autobiography written in 1988?,moonwalk,moon walk,0,0,,,,
-In which decade did stereo records first go on sale?,1930s,1930–1939,0,0,,,,
-In what year's Olympics were electric timing devices and a public-address system used for the first time?,in 1912 in stockholm,in 1912 in stockholm,1,0.75,,,,
-Which volcano in Tanzania is the highest mountain in Africa?,kilimanjaro,mawensi,0,0,,,,
-The flag of Libya is a plain rectangle of which color?,green,greenishness,0,0,,,,
-Of which African country is Niamey the capital?,niger,niger,1,1,,,,
-Who was the director of the CIA from 1976-81?,george bush,georgebush,0,0,,,,
-Which musical featured the song The Street Where You Live?,my fair lady,my fair lady musical,0,0.8571428571428571,,,,
-"""Who was the target of the failed """"Bomb Plot"""" of 1944?""",hitler,hitler s medical health,0,0.4,,,,
-Who had an 80s No 1 hit with Hold On To The Nights?,richard marx,richard marx,1,1,,,,
-Who directed the classic 30s western Stagecoach?,john ford,john ford 1895 1973,0,0.6666666666666666,,,,
-Dave Gilmore and Roger Waters were in which rock group?,pink floyd,screaming abdabs,0,0,,,,
-Which highway was Revisited in a classic 60s album by Bob Dylan?,61,61,1,1,,,,
-Which was the only eastern bloc country to participate in the 1984 LA Olympics?,rumania,danubian carpathian area,0,0,,,,
-Which 90s sci fi series with James Belushi was based on Bruce Wagner's comic strip of the same name?,wild palms,wild palms,1,1,,,,
-If I Were A Rich Man Was a big hit from which stage show?,fiddler on roof,fiddler on roof,1,1,,,,
-Men Against the Sea and Pitcairn's Island were two sequels to what famous novel?,mutiny on bounty,mutiny on bounty history,0,0.8571428571428571,,,,
-What was Truman Capote's last name before he was adopted by his stepfather?,persons,personhood theory,0,0,,,,
-"In Lewis Carroll's poem The Hunting of the Snark, what did the elusive, troublesome snark turn into to fool hunters?",boojum,boojum disambiguation,0,0.6666666666666666,,,,
-"In the Bible, who did the sun and moon stand still before?",joshua,jehoshua,0,0,,,,
-What Michelle Pfeiffer movie got a boost from the Coolio song Gangsta's Paradise?,dangerous minds,my posse don t do homework,0,0,,,,
-What was President Gerald Ford's middle name?,rudolph,rudolf,0,0,,,,
-Art Garfunkel trained for which profession although he didn't qualify?,architect,master builder occupation,0,0,,,,
-Who was the last inmate of Spandau jail in Berlin?,rudolf hess,rudolf hesse,0,0.5,,,,
-What was Eddie Murphy's first movie?,48 hours,48 hours,1,1,,,,
-In the 80s who wrote the novel Empire of The Sun?,j g ballard,ballardian,0,0,,,,
-Kagoshima international airport is in which country?,japan,nihon koku,0,0,,,,
-In which sport could the Pacers take on the Pistons?,basketball,men s basketball,0,0.5,,,,
-Kim Carnes' nine weeks at No 1 with Bette Davis Eyes was interrupted for one week by which song?,stars on 45 medley,stars on 45 song,0,0.75,,,,
-Where in Canada is the Lion's Gate bridge?,vancouver,south vancouver british columbia,0,0.4,,,,
-What was Walter Matthau's first movie?,kentuckian,kentuckian,1,1,,,,
-Otis Barton was a pioneer in exploring where?,underwater,under water,0,0,,,,
-Where in England was actor Nigel Hawthorne born?,coventry,coventry uk,0,0.6666666666666666,,,,
-"What mythological beast has the head of a man, the body of a lion, and the tail and feet of a dragon?",manticore,manticore,1,1,,,,
-"In Greek mythology, who were Arges, Brontes and Steropes?",cyclopes,cyclopes disambiguation,0,0.6666666666666666,,,,
-Which musician founded the Red Hot Peppers?,jelly roll morton,ferdinand morton,0,0.4,,,,
-Where did the Shinning Path terrorists operate?,peru,republic of perú,0,0,,,,
-How old was Jimi Hendrix when he died?,27,27,1,1,,,,
-Which Brit broke the land speed record in 1990 in Thrust 2?,richard noble,richard noble,1,1,,,,
-In which state was Gene Vincent born?,virginia,commonwealth of virginia,0,0.5,,,,
-How was the European Recovery Program in the 1940s more commonly known?,marshall plan,marshall aid plan,0,0.8,,,,
-Brandon Lee died during the making of which movie?,crow,crow,1,1,,,,
-Who had a 70s No 1 hit with Let's Do It Again?,staple singers,cleotha staples,0,0,,,,
-Who had a Too Legit To Quit Tour?,mc hammer,too tight mc hammer album,0,0.5714285714285715,,,,
-"""According to Rudyard Kipling what were the """"two imposters"""" to meet and treat the same day?""",triumph and disaster,triumph and disaster,1,1,,,,
-Who is the most successful UK solo artist in the USA?,elton john,lady choc ice,0,0,,,,
-Which country does the airline TAAG come from?,angola,angola,1,1,,,,
-Which US No 1 single came from Diana Ross's platinum album Diana?,upside down,upside down diana ross song,0,0.5714285714285715,,,,
-River Phoenix died during the making of which movie?,dark blood,dark blood,1,1,,,,
-Which artist David was born in Bradford UK?,hockney,hockney,1,1,,,,
-What is Mel Gibson's middle name?,columcille,colum cille,0,0,,,,
-Richard Daley was mayor of which city for 21 years?,chicago,sayre language academy,0,0,,,,
-"""In which movie did Garbo say, """"I want to be alone"""".""",grand hotel,grand hotel disambiguation,0,0.8,,,,
-What is Osbert Lancaster best known for producing?,cartoons,cartoonish,0,0,,,,
-Who was the defending champion when Martina Navratilova first won Wimbledon singles?,virginia wade,virginia wade,1,1,,,,
-Who was the first US-born winner of golf's British Open?,walter hagen,hagen walter,0,1,,,,
-In which country is the Sky Train Rail bridge?,canada,canada s,0,0.6666666666666666,,,,
-What was the Paramount Film Company originally called?,famous players film company,famous players film company,1,1,,,,
-Who was the first person after Scott to reach the South Pole overland?,edmond hillary,sir edmund,0,0,,,,
-Which journalist first told the world about the My Lai massacre?,seymour hersh,dark side of camelot,0,0,,,,
-What is the name of Terence and Shirley Conran's dress designer son?,jasper,lydian stone,0,0,,,,
-Which drink did The Spice Girls promote?,pepsi,homemade pepsi,0,0.6666666666666666,,,,
-Who was the youngest brother in the Beach Boys?,carl wilson,carl wilson discography,0,0.8,,,,
-Who first hosted Family Feud?,richard dawson,colin lionel emm,0,0,,,,
-What did the Lone Ranger's title Kemo Sabe mean in Apache?,white shirt,lèine bhàn,0,0,,,,
-Who or what was Gentle Ben in the 60s TV series?,bear cub,ursidae,0,0,,,,
-Which 70s show was based on the British show Till Death Us Do Part?,all in family,stretch cunningham,0,0,,,,
-On what date in 1969 did Neil Armstrong first set foot on the Moon?,july 20th,20-Jul,0,0.5,,,,
-Bandar Seri Begawan International airport is in which country?,brunei,legal system of brunei,0,0.4,,,,
-What was the profession of Paul Strand (1890 - 1976)?,photographer,photographr,0,0,,,,
-Who had a 60s No 1 with Downtown?,petula clark,petula clarke,0,0.5,,,,
-"Who was born first, Kiefer Sutherland or Christian Slater?",kiefer sutherland,keifer sutherland,0,0.5,,,,
-"To the nearest two, how many tennis Grand Slam titles did Jimmy Connors win?",10,10,1,1,,,,
-Who was the Georgia Peach?,ty cobb,tyrus raymond cobb,0,0.4,,,,
-Who set fire to his guitar at the Monterey Pop festival in 19676?,jimi hendrix,johnny allen hendrix,0,0.4,,,,
-Della Street was whose secretary?,perry mason,perry mason,1,1,,,,
-"In music, who was Sweet and Innocent and Too Young?",donny osmond,donald osmond,0,0.5,,,,
-Who is featured on Puff Daddy's Can't Hold Me Down?,mase,officially back,0,0,,,,
-What had Edmond Hillary worked at before taking up mountain climbing?,bee keeping,bee keepers,0,0.5,,,,
-In which American state is the Isabella Stewart Gardner Museum?,massachusetts,mass,0,0,,,,
-Benina international airport is in which country?,libya,iso 3166 1 ly,0,0,,,,
-Beloved in 1999 was whose first movie since The Color Purple in 1985?,oprah winfrey,oprah gail winfrey,0,0.8,,,,
-Which Star Trek star directed Three Men and a Baby?,leonard nimoy,leonard nimoy,1,1,,,,
-Which sitcom star appeared on the big screening The Object of My Affection?,jennifer aniston,jennifer joanna anastassakis,0,0.4,,,,
-"""Which character did Julia """"Roberts play in Steven Spielberg's Hook?""",tinkerbell,pixie dust,0,0,,,,
-Which US president did Anthony Hopkins play in a film whose title was simply his name?,nixon,richard nickson,0,0,,,,
-Which movie was a biopic about the life of David Helfgott?,shine,shine ep,0,0.6666666666666666,,,,
-Which film director guested as the FBI Director in The Silence of the Lambs?,roger corman,roger william corman,0,0.8,,,,
-In which sci fi classic did the space ship Nostromo first appear?,alien,aliens computer game,0,0,,,,
-Nigel Hawthorne was Oscar nominated for The Madness of which King?,george,george s,0,0.6666666666666666,,,,
-Which Swedish actress won the Best Supporting Actress Oscar for Murder on the Orient Express?,ingrid bergman,isotta ingrid rossellini,0,0.4,,,,36.7
-,,,,,,23,,
-,,EM,23%,0.367,,,,
+Question,Prediction,Reference,ExactMatch,F1Score
+Who was the man behind The Chipmunks?,david seville,david seville,1.0,1.0
+Which Lloyd Webber musical premiered in the US on 10th December 1993?,sunset boulevard,sunset boulevard,1.0,1.0
+Who was the next British Prime Minister after Arthur Balfour?,campbellbannerman,henry campbell bannerman,0.0,0.0
+Who had a 70s No 1 hit with Kiss You All Over?,exile,exiles,0.0,0.0
+What claimed the life of singer Kathleen Ferrier?,cancer,aids related cancer,0.0,0.5
+Rita Coolidge sang the title song for which Bond film?,octopussy,list of bond girls in octopussy,0.0,0.2857142857142857
+What was the last US state to reintroduce alcohol after prohibition?,utah,history of mining in utah,0.0,0.33333333333333337
+Which actress was voted Miss Greenwich Village in 1942?,lauren bacall,lauren becall,0.0,0.5
+What is the Japanese share index called?,nikkei,nikkei disambiguation,0.0,0.6666666666666666
+What was the name of Michael Jackson's autobiography written in 1988?,moonwalk,moon walk,0.0,0.0
+In which decade did stereo records first go on sale?,1930s,1930–1939,0.0,0.0
+In what year's Olympics were electric timing devices and a public-address system used for the first time?,in 1912 in stockholm,in 1912 in stockholm,1.0,0.75
+Which volcano in Tanzania is the highest mountain in Africa?,kilimanjaro,mawensi,0.0,0.0
+The flag of Libya is a plain rectangle of which color?,green,greenishness,0.0,0.0
+Of which African country is Niamey the capital?,niger,niger,1.0,1.0
+Who was the director of the CIA from 1976-81?,george bush,georgebush,0.0,0.0
+Which musical featured the song The Street Where You Live?,my fair lady,my fair lady musical,0.0,0.8571428571428571
+"""Who was the target of the failed """"Bomb Plot"""" of 1944?""",hitler,hitler s medical health,0.0,0.4
+Who had an 80s No 1 hit with Hold On To The Nights?,richard marx,richard marx,1.0,1.0
+Who directed the classic 30s western Stagecoach?,john ford,john ford 1895 1973,0.0,0.6666666666666666
+Dave Gilmore and Roger Waters were in which rock group?,pink floyd,screaming abdabs,0.0,0.0
+Which highway was Revisited in a classic 60s album by Bob Dylan?,61,61,1.0,1.0
+Which was the only eastern bloc country to participate in the 1984 LA Olympics?,rumania,danubian carpathian area,0.0,0.0
+Which 90s sci fi series with James Belushi was based on Bruce Wagner's comic strip of the same name?,wild palms,wild palms,1.0,1.0
+If I Were A Rich Man Was a big hit from which stage show?,fiddler on roof,fiddler on roof,1.0,1.0
+Men Against the Sea and Pitcairn's Island were two sequels to what famous novel?,mutiny on bounty,mutiny on bounty history,0.0,0.8571428571428571
+What was Truman Capote's last name before he was adopted by his stepfather?,persons,personhood theory,0.0,0.0
+"In Lewis Carroll's poem The Hunting of the Snark, what did the elusive, troublesome snark turn into to fool hunters?",boojum,boojum disambiguation,0.0,0.6666666666666666
+"In the Bible, who did the sun and moon stand still before?",joshua,jehoshua,0.0,0.0
+What Michelle Pfeiffer movie got a boost from the Coolio song Gangsta's Paradise?,dangerous minds,my posse don t do homework,0.0,0.0
+What was President Gerald Ford's middle name?,rudolph,rudolf,0.0,0.0
+Art Garfunkel trained for which profession although he didn't qualify?,architect,master builder occupation,0.0,0.0
+Who was the last inmate of Spandau jail in Berlin?,rudolf hess,rudolf hesse,0.0,0.5
+What was Eddie Murphy's first movie?,48 hours,48 hours,1.0,1.0
+In the 80s who wrote the novel Empire of The Sun?,j g ballard,ballardian,0.0,0.0
+Kagoshima international airport is in which country?,japan,nihon koku,0.0,0.0
+In which sport could the Pacers take on the Pistons?,basketball,men s basketball,0.0,0.5
+Kim Carnes' nine weeks at No 1 with Bette Davis Eyes was interrupted for one week by which song?,stars on 45 medley,stars on 45 song,0.0,0.75
+Where in Canada is the Lion's Gate bridge?,vancouver,south vancouver british columbia,0.0,0.4
+What was Walter Matthau's first movie?,kentuckian,kentuckian,1.0,1.0
+Otis Barton was a pioneer in exploring where?,underwater,under water,0.0,0.0
+Where in England was actor Nigel Hawthorne born?,coventry,coventry uk,0.0,0.6666666666666666
+"What mythological beast has the head of a man, the body of a lion, and the tail and feet of a dragon?",manticore,manticore,1.0,1.0
+"In Greek mythology, who were Arges, Brontes and Steropes?",cyclopes,cyclopes disambiguation,0.0,0.6666666666666666
+Which musician founded the Red Hot Peppers?,jelly roll morton,ferdinand morton,0.0,0.4
+Where did the Shinning Path terrorists operate?,peru,republic of perú,0.0,0.0
+How old was Jimi Hendrix when he died?,27,27,1.0,1.0
+Which Brit broke the land speed record in 1990 in Thrust 2?,richard noble,richard noble,1.0,1.0
+In which state was Gene Vincent born?,virginia,commonwealth of virginia,0.0,0.5
+How was the European Recovery Program in the 1940s more commonly known?,marshall plan,marshall aid plan,0.0,0.8
+Brandon Lee died during the making of which movie?,crow,crow,1.0,1.0
+Who had a 70s No 1 hit with Let's Do It Again?,staple singers,cleotha staples,0.0,0.0
+Who had a Too Legit To Quit Tour?,mc hammer,too tight mc hammer album,0.0,0.5714285714285715
+"""According to Rudyard Kipling what were the """"two imposters"""" to meet and treat the same day?""",triumph and disaster,triumph and disaster,1.0,1.0
+Who is the most successful UK solo artist in the USA?,elton john,lady choc ice,0.0,0.0
+Which country does the airline TAAG come from?,angola,angola,1.0,1.0
+Which US No 1 single came from Diana Ross's platinum album Diana?,upside down,upside down diana ross song,0.0,0.5714285714285715
+River Phoenix died during the making of which movie?,dark blood,dark blood,1.0,1.0
+Which artist David was born in Bradford UK?,hockney,hockney,1.0,1.0
+What is Mel Gibson's middle name?,columcille,colum cille,0.0,0.0
+Richard Daley was mayor of which city for 21 years?,chicago,sayre language academy,0.0,0.0
+"""In which movie did Garbo say, """"I want to be alone"""".""",grand hotel,grand hotel disambiguation,0.0,0.8
+What is Osbert Lancaster best known for producing?,cartoons,cartoonish,0.0,0.0
+Who was the defending champion when Martina Navratilova first won Wimbledon singles?,virginia wade,virginia wade,1.0,1.0
+Who was the first US-born winner of golf's British Open?,walter hagen,hagen walter,0.0,1.0
+In which country is the Sky Train Rail bridge?,canada,canada s,0.0,0.6666666666666666
+What was the Paramount Film Company originally called?,famous players film company,famous players film company,1.0,1.0
+Who was the first person after Scott to reach the South Pole overland?,edmond hillary,sir edmund,0.0,0.0
+Which journalist first told the world about the My Lai massacre?,seymour hersh,dark side of camelot,0.0,0.0
+What is the name of Terence and Shirley Conran's dress designer son?,jasper,lydian stone,0.0,0.0
+Which drink did The Spice Girls promote?,pepsi,homemade pepsi,0.0,0.6666666666666666
+Who was the youngest brother in the Beach Boys?,carl wilson,carl wilson discography,0.0,0.8
+Who first hosted Family Feud?,richard dawson,colin lionel emm,0.0,0.0
+What did the Lone Ranger's title Kemo Sabe mean in Apache?,white shirt,lèine bhàn,0.0,0.0
+Who or what was Gentle Ben in the 60s TV series?,bear cub,ursidae,0.0,0.0
+Which 70s show was based on the British show Till Death Us Do Part?,all in family,stretch cunningham,0.0,0.0
+On what date in 1969 did Neil Armstrong first set foot on the Moon?,july 20th,20 july,0.0,0.5
+Bandar Seri Begawan International airport is in which country?,brunei,legal system of brunei,0.0,0.4
+What was the profession of Paul Strand (1890 - 1976)?,photographer,photographr,0.0,0.0
+Who had a 60s No 1 with Downtown?,petula clark,petula clarke,0.0,0.5
+"Who was born first, Kiefer Sutherland or Christian Slater?",kiefer sutherland,keifer sutherland,0.0,0.5
+"To the nearest two, how many tennis Grand Slam titles did Jimmy Connors win?",10,10,1.0,1.0
+Who was the Georgia Peach?,ty cobb,tyrus raymond cobb,0.0,0.4
+Who set fire to his guitar at the Monterey Pop festival in 19676?,jimi hendrix,johnny allen hendrix,0.0,0.4
+Della Street was whose secretary?,perry mason,perry mason,1.0,1.0
+"In music, who was Sweet and Innocent and Too Young?",donny osmond,donald osmond,0.0,0.5
+Who is featured on Puff Daddy's Can't Hold Me Down?,mase,officially back,0.0,0.0
+What had Edmond Hillary worked at before taking up mountain climbing?,bee keeping,bee keepers,0.0,0.5
+In which American state is the Isabella Stewart Gardner Museum?,massachusetts,mass,0.0,0.0
+Benina international airport is in which country?,libya,iso 3166 1 ly,0.0,0.0
+Beloved in 1999 was whose first movie since The Color Purple in 1985?,oprah winfrey,oprah gail winfrey,0.0,0.8
+Which Star Trek star directed Three Men and a Baby?,leonard nimoy,leonard nimoy,1.0,1.0
+Which sitcom star appeared on the big screening The Object of My Affection?,jennifer aniston,jennifer joanna anastassakis,0.0,0.4
+"""Which character did Julia """"Roberts play in Steven Spielberg's Hook?""",tinkerbell,pixie dust,0.0,0.0
+Which US president did Anthony Hopkins play in a film whose title was simply his name?,nixon,richard nickson,0.0,0.0
+Which movie was a biopic about the life of David Helfgott?,shine,shine ep,0.0,0.6666666666666666
+Which film director guested as the FBI Director in The Silence of the Lambs?,roger corman,roger william corman,0.0,0.8
+In which sci fi classic did the space ship Nostromo first appear?,alien,aliens computer game,0.0,0.0
+Nigel Hawthorne was Oscar nominated for The Madness of which King?,george,george s,0.0,0.6666666666666666
+Which Swedish actress won the Best Supporting Actress Oscar for Murder on the Orient Express?,ingrid bergman,isotta ingrid rossellini,0.0,0.4
