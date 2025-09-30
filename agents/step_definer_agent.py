@@ -1,6 +1,7 @@
 from typing import Dict, Any, List, Optional, Union
 from pydantic import BaseModel, Field
 from .base_agent import BaseAgent, AgentResponse
+from .tokenization_utils import tokenization_utils
 import json
 import logging
 
@@ -24,7 +25,7 @@ class StepDefinerAgent(BaseAgent):
     def __init__(
         self, 
         model_config: Optional[Dict[str, Any]] = None,
-        model_name: str = "meta-llama/Llama-2-7b-chat-hf",
+        model_name: str = "llama-2-13b-chat-hf",  # LLM for step definition
         max_subqueries: int = 3
     ):
         """
@@ -81,7 +82,8 @@ Examples of good subquery generation:
 **Step**: "Compare economic policies between countries"
 - Subquery 1: "What are Japan's current monetary policy rates and targets?"
 - Subquery 2: "What fiscal policies has South Korea implemented in the last 5 years?"
-- Subquery 3: "How do Japan and South Korea differ in their trade policy approaches?""""
+- Subquery 3: "How do Japan and South Korea differ in their trade policy approaches?"
+"""
     
     async def process(self, input_data: Dict[str, Any]) -> AgentResponse:
         """
@@ -113,25 +115,25 @@ Examples of good subquery generation:
             )
         
         try:
-            # Prepare the enhanced prompt with full context
+            # Prepare the enhanced prompt with full context (preprocess for LLM)
             prompt = f"""{self.system_prompt}
             
             ### Main Question:
-            {plan.get('main_question', 'Not specified')}
+            {tokenization_utils.preprocess_llm_input(plan.get('main_question', 'Not specified'))}
             
             ### Disambiguated Query:
-            {plan.get('disambiguated_query', plan.get('main_question', 'Not specified'))}
+            {tokenization_utils.preprocess_llm_input(plan.get('disambiguated_query', plan.get('main_question', 'Not specified')))}
             
             ### Query Type:
             {plan.get('query_type', 'unknown')}
             
             ### Current Step:
             ID: {step.get('id', 'unknown')}
-            Description: {step.get('description', 'No description')}
-            Objective: {step.get('objective', 'No objective')}
+            Description: {tokenization_utils.preprocess_llm_input(step.get('description', 'No description'))}
+            Objective: {tokenization_utils.preprocess_llm_input(step.get('objective', 'No objective'))}
             Dependencies: {', '.join(step.get('dependencies', [])) or 'None'}
             Critical: {step.get('critical', False)}
-            Expected Output: {step.get('expected_output', 'Not specified')}
+            Expected Output: {tokenization_utils.preprocess_llm_input(step.get('expected_output', 'Not specified'))}
             """
             
             # Add context if available
@@ -175,6 +177,9 @@ Examples of good subquery generation:
                 temperature=0.3,
                 max_new_tokens=1536
             )
+            
+            # Postprocess the LLM response
+            response = tokenization_utils.postprocess_answer(response, output_type="json")
             
             # Try to extract JSON from the response
             try:

@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 class LLMConfig(BaseModel):
     """Configuration for LLM models."""
-    model_name: str = "meta-llama/Llama-2-7b-chat-hf"
+    model_name: str = "google/gemini-pro"
     model_type: str = "huggingface"  # huggingface, llama_cpp, etc.
     device: str = "auto"  # auto, cuda, cpu, mps
     temperature: float = 0.7
@@ -229,7 +229,7 @@ if __name__ == "__main__":
     
     # Example with Hugging Face model
     hf_config = {
-        "model_name": "meta-llama/Llama-2-7b-chat-hf",
+        "model_name": "google/gemini-pro",
         "model_type": "huggingface",
         "device": "auto",
         "temperature": 0.7,

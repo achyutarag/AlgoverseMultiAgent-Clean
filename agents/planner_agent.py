@@ -1,6 +1,7 @@
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
 from .base_agent import BaseAgent, AgentResponse
+from .tokenization_utils import tokenization_utils
 import json
 import logging
 
@@ -24,7 +25,7 @@ class PlannerAgent(BaseAgent):
     def __init__(
         self, 
         model_config: Optional[Dict[str, Any]] = None,
-        model_name: str = "meta-llama/Llama-2-7b-chat-hf",
+        model_name: str = "llama-2-13b-chat-hf",  # LLM for complex planning
         max_steps: int = 5
     ):
         """
@@ -106,6 +107,9 @@ Examples of good step decomposition:
         context = input_data.get('context', {})
         max_steps = min(input_data.get('max_steps', self.max_steps), 10)  # Cap at 10 steps
         
+        # Normalize query for consistent processing
+        query = tokenization_utils.normalize_query(query)
+        
         if not query:
             return AgentResponse(
                 content="Error: No query provided",
@@ -113,11 +117,11 @@ Examples of good step decomposition:
             )
         
         try:
-            # Prepare the enhanced prompt with context
+            # Prepare the enhanced prompt with context (preprocess for LLM)
             prompt = f"""{self.system_prompt}
             
             ### Query to Analyze:
-            {query}
+            {tokenization_utils.preprocess_llm_input(query)}
             
             ### Additional Context:
             {json.dumps(context, indent=2) if context else "No additional context provided"}
@@ -138,6 +142,9 @@ Examples of good step decomposition:
                 temperature=0.2,  # Lower temperature for more consistent planning
                 max_new_tokens=2048
             )
+            
+            # Postprocess the LLM response
+            response = tokenization_utils.postprocess_answer(response, output_type="json")
             
             # Try to extract JSON from the response
             try:

@@ -1,6 +1,7 @@
 from typing import Dict, Any, List, Optional, Union
 from pydantic import BaseModel, Field
 from .base_agent import BaseAgent, AgentResponse
+from .tokenization_utils import tokenization_utils
 import json
 import logging
 
@@ -34,7 +35,7 @@ class QAAgent(BaseAgent):
     def __init__(
         self, 
         model_config: Optional[Dict[str, Any]] = None,
-        model_name: str = "meta-llama/Llama-2-7b-chat-hf",
+        model_name: str = "llama-2-13b-chat-hf",  # LLM for answer synthesis
         temperature: float = 0.3,
         max_tokens: int = 1024
     ):
@@ -128,6 +129,9 @@ Examples of good answer synthesis:
         max_history = int(input_data.get('max_history_items', 4))
         min_confidence = max(0.0, min(1.0, float(input_data.get('min_confidence', 0.0))))
         
+        # Normalize question for consistent processing
+        question = tokenization_utils.normalize_query(question)
+        
         if not question:
             return AgentResponse(
                 content=json.dumps({
@@ -165,11 +169,11 @@ Examples of good answer synthesis:
             )
         
         try:
-            # Prepare the enhanced prompt with step-specific context
+            # Prepare the enhanced prompt with step-specific context (preprocess for LLM)
             prompt = f"""{self.system_prompt}
             
             ### Subquery to Answer:
-            {question}
+            {tokenization_utils.preprocess_llm_input(question)}
             
             ### Step Context:
             {json.dumps(step_context, indent=2) if step_context else "No specific step context"}
@@ -249,6 +253,9 @@ Examples of good answer synthesis:
                 temperature=self.temperature,
                 max_new_tokens=self.max_tokens
             )
+            
+            # Postprocess the LLM response
+            response = tokenization_utils.postprocess_answer(response, output_type="json")
             
             try:
                 # Extract JSON from the response

@@ -15,7 +15,7 @@ class BaseAgent(ABC):
         self, 
         name: str, 
         model_config: Optional[Union[Dict[str, Any], LLMConfig]] = None,
-        model_name: str = "meta-llama/Llama-2-7b-chat-hf"  # Default model
+        model_name: str = "google/gemini-pro"  # Default model
     ):
         self.name = name
         self.history: List[Dict[str, str]] = []

@@ -1,6 +1,7 @@
 from typing import Dict, Any, List, Optional, Union
 from pydantic import BaseModel, Field
 from .base_agent import BaseAgent, AgentResponse
+from .tokenization_utils import tokenization_utils
 import json
 import logging
 import re
@@ -25,7 +26,7 @@ class ExtractorAgent(BaseAgent):
     def __init__(
         self, 
         model_config: Optional[Dict[str, Any]] = None,
-        model_name: str = "meta-llama/Llama-2-7b-chat-hf",
+        model_name: str = "distilbert-base-uncased",  # SLM for extraction
         temperature: float = 0.1,
         max_tokens: int = 2048
     ):
@@ -112,6 +113,9 @@ Examples of good extraction:
         min_relevance = max(0.0, min(1.0, float(input_data.get('min_relevance', 0.5))))
         context_needed = input_data.get('context_needed', ['factual'])
         
+        # Normalize query for consistent processing
+        query = tokenization_utils.normalize_query(query)
+        
         if not query:
             return AgentResponse(
                 content="Error: No query provided",
@@ -128,11 +132,11 @@ Examples of good extraction:
             # Limit number of documents to process
             documents = documents[:max_documents]
             
-            # Prepare the enhanced prompt
+            # Prepare the enhanced prompt (preprocess for LLM)
             prompt = f"""{self.system_prompt}
             
             ### Subquery to Extract For:
-            {query}
+            {tokenization_utils.preprocess_llm_input(query)}
             
             ### Context Types Needed:
             {', '.join(context_needed)}
@@ -191,6 +195,9 @@ Examples of good extraction:
                 temperature=self.temperature,
                 max_new_tokens=self.max_tokens
             )
+            
+            # Postprocess the LLM response
+            response = tokenization_utils.postprocess_answer(response, output_type="json")
             
             try:
                 # Extract JSON from the response
