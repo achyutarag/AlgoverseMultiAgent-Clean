@@ -35,7 +35,7 @@ class QAAgent(BaseAgent):
     def __init__(
         self, 
         model_config: Optional[Dict[str, Any]] = None,
-        model_name: str = "llama-2-13b-chat-hf",  # LLM for answer synthesis
+        model_name: str = "gemini-1.5-pro",  # LLM for answer synthesis
         temperature: float = 0.3,
         max_tokens: int = 1024
     ):

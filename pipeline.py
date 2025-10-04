@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # Default configuration constants
 DEFAULT_CONFIG = {
     "model": {
-        "name": "meta-llama/Llama-2-7b-chat-hf",
+        "name": "gemini-1.5-pro",
         "device": "cuda" if torch.cuda.is_available() else "cpu",
         "temperature": 0.2,
         "max_tokens": 1024,
@@ -1074,7 +1074,7 @@ async def example_usage():
         pipeline = MARAGPipeline(
             config={
                 "model": {
-                    "name": "meta-llama/Llama-2-7b-chat-hf",
+                    "name": "gemini-1.5-pro",
                     "temperature": 0.3,
                     "max_tokens": 1024
                 },

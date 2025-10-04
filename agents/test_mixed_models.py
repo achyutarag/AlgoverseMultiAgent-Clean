@@ -37,9 +37,9 @@ async def test_model_configuration():
         orchestrator = await create_optimized_marag_pipeline(
             retrieval_model="all-MiniLM-L6-v2",      # SLM
             extraction_model="distilbert-base-uncased",  # SLM
-            planning_model="llama-2-13b-chat-hf",    # LLM
-            step_definition_model="llama-2-13b-chat-hf",  # LLM
-            qa_model="llama-2-13b-chat-hf"           # LLM
+            planning_model="gemini-1.5-pro",    # LLM
+            step_definition_model="gemini-1.5-pro",  # LLM
+            qa_model="gemini-1.5-pro"           # LLM
         )
         
         print("✅ Mixed Model Orchestrator created successfully")
@@ -105,7 +105,7 @@ async def test_agent_initialization():
         
         # Verify model types
         slm_models = ["all-MiniLM-L6-v2", "distilbert-base-uncased"]
-        llm_models = ["llama-2-13b-chat-hf"]
+        llm_models = ["gemini-1.5-pro"]
         
         print("\n🔍 Model Type Verification:")
         print(f"  Retriever ({retriever.model_name}): {'SLM' if retriever.model_name in slm_models else 'Unknown'}")
@@ -177,9 +177,9 @@ async def demonstrate_usage():
    orchestrator = await create_optimized_marag_pipeline(
        retrieval_model="all-MiniLM-L6-v2",        # SLM
        extraction_model="distilbert-base-uncased", # SLM
-       planning_model="llama-2-13b-chat-hf",     # LLM
-       step_definition_model="llama-2-13b-chat-hf", # LLM
-       qa_model="llama-2-13b-chat-hf"             # LLM
+       planning_model="gemini-1.5-pro",     # LLM
+       step_definition_model="gemini-1.5-pro", # LLM
+       qa_model="gemini-1.5-pro"             # LLM
    )
    ```
 
@@ -190,7 +190,7 @@ async def demonstrate_usage():
    result = await run_optimized_marag_pipeline(
        query="Your question here",
        retrieval_model="all-MiniLM-L6-v2",
-       planning_model="llama-2-13b-chat-hf"
+       planning_model="gemini-1.5-pro"
    )
    ```
 

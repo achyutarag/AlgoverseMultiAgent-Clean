@@ -33,9 +33,9 @@ class MixedModelOrchestrator(MARAGOrchestrator):
         extraction_model: str = "distilbert-base-uncased",
         
         # LLM models for reasoning tasks
-        planning_model: str = "llama-2-13b-chat-hf",
-        step_definition_model: str = "llama-2-13b-chat-hf", 
-        qa_model: str = "llama-2-13b-chat-hf",
+        planning_model: str = "gemini-1.5-pro",
+        step_definition_model: str = "gemini-1.5-pro", 
+        qa_model: str = "gemini-1.5-pro",
         
         # Model configurations
         slm_config: Optional[Dict[str, Any]] = None,
@@ -232,9 +232,9 @@ class MixedModelOrchestrator(MARAGOrchestrator):
 async def create_optimized_marag_pipeline(
     retrieval_model: str = "all-MiniLM-L6-v2",
     extraction_model: str = "distilbert-base-uncased",
-    planning_model: str = "llama-2-13b-chat-hf",
-    step_definition_model: str = "llama-2-13b-chat-hf",
-    qa_model: str = "llama-2-13b-chat-hf",
+    planning_model: str = "gemini-1.5-pro",
+    step_definition_model: str = "gemini-1.5-pro",
+    qa_model: str = "gemini-1.5-pro",
     **kwargs
 ) -> MixedModelOrchestrator:
     """
@@ -264,9 +264,9 @@ async def run_optimized_marag_pipeline(
     query: str,
     retrieval_model: str = "all-MiniLM-L6-v2",
     extraction_model: str = "distilbert-base-uncased", 
-    planning_model: str = "llama-2-13b-chat-hf",
-    step_definition_model: str = "llama-2-13b-chat-hf",
-    qa_model: str = "llama-2-13b-chat-hf",
+    planning_model: str = "gemini-1.5-pro",
+    step_definition_model: str = "gemini-1.5-pro",
+    qa_model: str = "gemini-1.5-pro",
     context: Optional[Dict[str, Any]] = None,
     **kwargs
 ) -> PipelineResult:

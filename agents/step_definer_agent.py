@@ -25,7 +25,7 @@ class StepDefinerAgent(BaseAgent):
     def __init__(
         self, 
         model_config: Optional[Dict[str, Any]] = None,
-        model_name: str = "llama-2-13b-chat-hf",  # LLM for step definition
+        model_name: str = "gemini-1.5-pro",  # LLM for step definition
         max_subqueries: int = 3
     ):
         """

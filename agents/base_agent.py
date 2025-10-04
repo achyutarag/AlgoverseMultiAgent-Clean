@@ -15,7 +15,7 @@ class BaseAgent(ABC):
         self, 
         name: str, 
         model_config: Optional[Union[Dict[str, Any], LLMConfig]] = None,
-        model_name: str = "google/gemini-pro"  # Default model
+        model_name: str = "gemini-1.5-pro"  # Default model
     ):
         self.name = name
         self.history: List[Dict[str, str]] = []
@@ -24,7 +24,7 @@ class BaseAgent(ABC):
         if model_config is None:
             model_config = {
                 "model_name": model_name,
-                "model_type": "huggingface",  # Default to huggingface
+                "model_type": "google_gemini",  # Default to google_gemini
                 "temperature": 0.7,
                 "max_new_tokens": 1024,
                 "use_quantization": True,

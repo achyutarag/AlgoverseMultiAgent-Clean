@@ -2,25 +2,20 @@ from typing import List, Dict, Any, Optional, Union
 from abc import ABC, abstractmethod
 from pydantic import BaseModel, Field
 import torch
+import google.generativeai as genai
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    BitsAndBytesConfig,
-    pipeline,
-    StoppingCriteria,
-    StoppingCriteriaList
+    BitsAndBytesConfig
 )
-from langchain.llms import LlamaCpp
-from langchain.callbacks.manager import CallbackManager
-from langchain.callbacks.streaming_stdout import StreamingStdOutCallbackHandler
 import logging
 
 logger = logging.getLogger(__name__)
 
 class LLMConfig(BaseModel):
     """Configuration for LLM models."""
-    model_name: str = "google/gemini-pro"
-    model_type: str = "huggingface"  # huggingface, llama_cpp, etc.
+    model_name: str = "gemini-1.5-pro"
+    model_type: str = "google_gemini"  # google_gemini, huggingface, etc.
     device: str = "auto"  # auto, cuda, cpu, mps
     temperature: float = 0.7
     max_new_tokens: int = 1024
@@ -30,11 +25,6 @@ class LLMConfig(BaseModel):
     use_flash_attention: bool = False
     trust_remote_code: bool = True
     
-    # LLaMA.cpp specific
-    model_path: Optional[str] = None
-    n_gpu_layers: int = -1  # -1 for all layers
-    n_ctx: int = 2048
-    n_batch: int = 512
 
 class LLMResponse(BaseModel):
     """Standardized response from LLM."""
@@ -70,88 +60,53 @@ class BaseLLMWrapper(ABC):
             return len(text.split())  # Fallback to word count
         return len(self.tokenizer.encode(text, add_special_tokens=False))
 
-class HuggingFaceLLM(BaseLLMWrapper):
-    """Wrapper for Hugging Face models."""
+class GoogleGeminiLLM(BaseLLMWrapper):
+    """Wrapper for Google Gemini models."""
     
     def _load_model(self):
-        """Load the Hugging Face model and tokenizer."""
+        """Load the Google Gemini model."""
         try:
-            quantization_config = None
-            if self.config.use_quantization:
-                quantization_config = BitsAndBytesConfig(
-                    load_in_4bit=self.config.load_in_4bit,
-                    bnb_4bit_compute_dtype=torch.bfloat16,
-                    bnb_4bit_use_double_quant=True,
-                    bnb_4bit_quant_type="nf4",
-                )
+            import os
+            from dotenv import load_dotenv
+            load_dotenv()
+
+            # Set up service account authentication
+            credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+            if not credentials_path:
+                raise ValueError("GOOGLE_APPLICATION_CREDENTIALS not set in .env file")
+
+            # Set the environment variable for Google Cloud authentication
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_path
             
-            # Set device map
-            device_map = self.config.device
-            if device_map == "auto":
-                device_map = "auto"
+            # Configure Gemini (no credentials parameter needed - it uses env var)
+            genai.configure()
             
-            # Load tokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.config.model_name,
-                trust_remote_code=self.config.trust_remote_code
-            )
+            # Load Gemini model
+            self.model = genai.GenerativeModel(self.config.model_name)
             
-            # Load model
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.config.model_name,
-                device_map=device_map,
-                quantization_config=quantization_config,
-                trust_remote_code=self.config.trust_remote_code,
-                torch_dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-                use_flash_attention_2=self.config.use_flash_attention
-            )
-            
-            # Set pad token if not set
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-            
-            logger.info(f"Loaded model {self.config.model_name} on {self.model.device}")
+            logger.info(f"Loaded Google Gemini model: {self.config.model_name}")
             
         except Exception as e:
-            logger.error(f"Error loading model: {str(e)}")
+            logger.error(f"Error loading Google model: {str(e)}")
             raise
     
     async def generate(self, prompt: str, **kwargs) -> LLMResponse:
-        """Generate text from a prompt."""
+        """Generate text from a prompt using Google Gemini."""
         try:
-            # Prepare inputs
-            inputs = self.tokenizer(prompt, return_tensors="pt", padding=True, truncation=True, 
-                                 max_length=self.config.context_length - self.config.max_new_tokens)
+            # Generate response using Gemini
+            response = self.model.generate_content(prompt)
             
-            # Move to the same device as model
-            inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
-            
-            # Generate
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    **inputs,
-                    max_new_tokens=kwargs.get("max_new_tokens", self.config.max_new_tokens),
-                    temperature=kwargs.get("temperature", self.config.temperature),
-                    do_sample=True,
-                    pad_token_id=self.tokenizer.eos_token_id,
-                    **{k: v for k, v in kwargs.items() if k not in ["max_new_tokens", "temperature"]}
-                )
-            
-            # Decode the output
-            generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-            
-            # Remove the input prompt from the output
-            if kwargs.get("remove_prompt", True):
-                generated_text = generated_text[len(prompt):].strip()
+            # Extract the generated text
+            generated_text = response.text if response.text else ""
             
             return LLMResponse(
                 text=generated_text,
                 model_name=self.config.model_name,
-                model_type="huggingface",
+                model_type="google_gemini",
                 usage={
-                    "prompt_tokens": inputs["input_ids"].shape[1],
-                    "generated_tokens": outputs.shape[1] - inputs["input_ids"].shape[1],
-                    "total_tokens": outputs.shape[1]
+                    "prompt_tokens": len(prompt.split()),
+                    "generated_tokens": len(generated_text.split()),
+                    "total_tokens": len(prompt.split()) + len(generated_text.split())
                 }
             )
             
@@ -159,56 +114,85 @@ class HuggingFaceLLM(BaseLLMWrapper):
             logger.error(f"Error in text generation: {str(e)}")
             raise
 
-class LlamaCppLLM(BaseLLMWrapper):
-    """Wrapper for LLaMA.cpp models."""
+class HuggingFaceLLM(BaseLLMWrapper):
+    """Wrapper for Hugging Face models."""
     
     def _load_model(self):
-        """Load the LLaMA.cpp model."""
+        """Load the Hugging Face model."""
         try:
-            callback_manager = CallbackManager([StreamingStdOutCallbackHandler()])
+            # Configure device
+            device = "cuda" if torch.cuda.is_available() and self.config.device != "cpu" else "cpu"
             
-            self.llm = LlamaCpp(
-                model_path=self.config.model_path or self.config.model_name,
-                n_ctx=self.config.n_ctx,
-                n_batch=self.config.n_batch,
-                n_gpu_layers=self.config.n_gpu_layers,
-                callback_manager=callback_manager,
-                verbose=True,
-                temperature=self.config.temperature,
-                max_tokens=self.config.max_new_tokens,
-                n_threads=4  # Adjust based on your CPU
+            # Load tokenizer
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                self.config.model_name,
+                trust_remote_code=self.config.trust_remote_code
             )
             
-            logger.info(f"Loaded LLaMA.cpp model: {self.config.model_path or self.config.model_name}")
+            # Configure quantization if needed
+            quantization_config = None
+            if self.config.use_quantization and self.config.load_in_4bit:
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_use_double_quant=True,
+                    bnb_4bit_quant_type="nf4"
+                )
+            
+            # Load model
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.config.model_name,
+                quantization_config=quantization_config,
+                device_map="auto" if device == "cuda" else None,
+                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                trust_remote_code=self.config.trust_remote_code
+            )
+            
+            if device == "cpu":
+                self.model = self.model.to(device)
+            
+            logger.info(f"Loaded Hugging Face model: {self.config.model_name} on {device}")
             
         except Exception as e:
-            logger.error(f"Error loading LLaMA.cpp model: {str(e)}")
+            logger.error(f"Error loading Hugging Face model: {str(e)}")
             raise
     
     async def generate(self, prompt: str, **kwargs) -> LLMResponse:
-        """Generate text from a prompt using LLaMA.cpp."""
+        """Generate text from a prompt using Hugging Face model."""
         try:
-            response = self.llm(
-                prompt,
-                max_tokens=kwargs.get("max_new_tokens", self.config.max_new_tokens),
-                temperature=kwargs.get("temperature", self.config.temperature),
-                **{k: v for k, v in kwargs.items() if k not in ["max_new_tokens", "temperature"]}
-            )
+            # Tokenize input
+            inputs = self.tokenizer.encode(prompt, return_tensors="pt")
+            if torch.cuda.is_available() and self.config.device != "cpu":
+                inputs = inputs.to("cuda")
             
-            # For LLaMA.cpp, we don't have token counts in the response
+            # Generate response
+            with torch.no_grad():
+                outputs = self.model.generate(
+                    inputs,
+                    max_new_tokens=kwargs.get("max_new_tokens", self.config.max_new_tokens),
+                    temperature=kwargs.get("temperature", self.config.temperature),
+                    do_sample=True,
+                    pad_token_id=self.tokenizer.eos_token_id
+                )
+            
+            # Decode response
+            generated_text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+            # Remove the input prompt from the response
+            response_text = generated_text[len(prompt):].strip()
+            
             return LLMResponse(
-                text=response,
+                text=response_text,
                 model_name=self.config.model_name,
-                model_type="llama_cpp",
+                model_type="huggingface",
                 usage={
-                    "prompt_tokens": self.get_token_count(prompt),
-                    "generated_tokens": self.get_token_count(response) - self.get_token_count(prompt),
-                    "total_tokens": self.get_token_count(response)
+                    "prompt_tokens": len(inputs[0]),
+                    "generated_tokens": len(outputs[0]) - len(inputs[0]),
+                    "total_tokens": len(outputs[0])
                 }
             )
             
         except Exception as e:
-            logger.error(f"Error in LLaMA.cpp text generation: {str(e)}")
+            logger.error(f"Error in Hugging Face text generation: {str(e)}")
             raise
 
 def get_llm(config: Union[Dict[str, Any], LLMConfig]) -> BaseLLMWrapper:
@@ -216,10 +200,10 @@ def get_llm(config: Union[Dict[str, Any], LLMConfig]) -> BaseLLMWrapper:
     if not isinstance(config, LLMConfig):
         config = LLMConfig(**config)
     
-    if config.model_type == "huggingface":
+    if config.model_type == "google_gemini":
+        return GoogleGeminiLLM(config)
+    elif config.model_type == "huggingface":
         return HuggingFaceLLM(config)
-    elif config.model_type == "llama_cpp":
-        return LlamaCppLLM(config)
     else:
         raise ValueError(f"Unsupported model type: {config.model_type}")
 
@@ -227,9 +211,18 @@ def get_llm(config: Union[Dict[str, Any], LLMConfig]) -> BaseLLMWrapper:
 if __name__ == "__main__":
     import asyncio
     
+    # Example with Google Gemini model
+    gemini_config = {
+        "model_name": "gemini-1.5-pro",
+        "model_type": "google_gemini",
+        "device": "auto",
+        "temperature": 0.7,
+        "max_new_tokens": 512
+    }
+    
     # Example with Hugging Face model
     hf_config = {
-        "model_name": "google/gemini-pro",
+        "model_name": "microsoft/DialoGPT-medium",
         "model_type": "huggingface",
         "device": "auto",
         "temperature": 0.7,
@@ -238,28 +231,19 @@ if __name__ == "__main__":
         "load_in_4bit": True
     }
     
-    # Example with LLaMA.cpp model
-    llama_cpp_config = {
-        "model_path": "models/llama-2-7b-chat.Q4_K_M.gguf",  # Path to your GGUF model
-        "model_type": "llama_cpp",
-        "n_ctx": 2048,
-        "n_batch": 512,
-        "n_gpu_layers": 35,  # Adjust based on your GPU
-        "temperature": 0.7,
-        "max_new_tokens": 512
-    }
     
     async def test_llm():
-        # Test with Hugging Face
-        print("Testing Hugging Face LLM...")
-        hf_llm = get_llm(hf_config)
-        response = await hf_llm.generate("Explain quantum computing in simple terms.")
-        print(f"Response: {response.text[:200]}...")
+        # Test with Google Gemini
+        print("Testing Google Gemini LLM...")
+        gemini_llm = get_llm(gemini_config)
+        response = await gemini_llm.generate("Explain quantum computing in simple terms.")
+        print(f"Gemini Response: {response.text[:200]}...")
         
-        # Test with LLaMA.cpp (uncomment to test)
-        # print("\nTesting LLaMA.cpp LLM...")
-        # llama_llm = get_llm(llama_cpp_config)
-        # response = await llama_llm.generate("Explain quantum computing in simple terms.")
-        # print(f"Response: {response.text[:200]}...")
+        # Test with Hugging Face (uncomment to test)
+        # print("\nTesting Hugging Face LLM...")
+        # hf_llm = get_llm(hf_config)
+        # response = await hf_llm.generate("Explain quantum computing in simple terms.")
+        # print(f"HF Response: {response.text[:200]}...")
+        
     
     asyncio.run(test_llm())

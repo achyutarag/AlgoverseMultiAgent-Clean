@@ -1,20 +1,21 @@
 # Core Dependencies
 langchain>=0.1.0
 langchain-community>=0.0.10
-langchain-openai>=0.0.2
 python-dotenv>=1.0.0
+
+# Google AI Dependencies
+google-generativeai>=0.3.0
+google-cloud-aiplatform>=1.38.0
 
 # Vector Store
 faiss-cpu>=1.7.4  # For CPU-based similarity search
 # faiss-gpu  # Uncomment for GPU support if available
 
-# LLaMA and Local LLM Support
+# Local LLM Support (for embeddings and small models)
 transformers>=4.36.0
 accelerate>=0.25.0
 bitsandbytes>=0.41.0
 sentence-transformers>=2.2.2
-# Temporarily disabled due to build issues
-# llama-cpp-python>=0.2.0  # For GGUF models
 
 # Research and Evaluation
 numpy>=1.24.0
@@ -27,5 +28,5 @@ bert-score>=0.3.13
 nltk>=3.8.1
 
 # Optional: For working with different model formats
-torch>=2.0.0  # PyTorch for LLaMA models
+torch>=2.0.0  # PyTorch for local models
 safetensors>=0.4.0

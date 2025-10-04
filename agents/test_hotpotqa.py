@@ -37,7 +37,7 @@ async def test_multi_dataset():
         
         results = []
         for i, example in enumerate(test_subset):
-            print(f"\nExample {i+1}/3:")
+            print(f"\nExample {i+1}/10:")
             print(f"Question: {example['question']}")
             
             try:
@@ -59,14 +59,14 @@ async def test_multi_dataset():
                 continue
         
         all_results[dataset_name] = results
-        print(f"\n{dataset_name} Results: {len(results)}/3 successful")
+        print(f"\n{dataset_name} Results: {len(results)}/10 successful")
     
     # Summary
     print(f"\n{'='*50}")
     print("SUMMARY")
     print(f"{'='*50}")
     for dataset_name, results in all_results.items():
-        print(f"{dataset_name}: {len(results)}/3 successful")
+        print(f"{dataset_name}: {len(results)}/10 successful")
     
     return all_results
 
