@@ -3,7 +3,6 @@
 
 # MA-RAG: Multi-Agent Retrieval-Augmented Generation Pipeline
 
-A sophisticated multi-agent system for complex question answering using Google Gemini API.
 
 ## 🚀 Features
 
