@@ -1,0 +1,21 @@
+Question,Prediction,Ground_Truth,ExactMatch,F1Score
+Who was the man behind The Chipmunks?,ERROR,David Seville,0.0,0.0
+Which Lloyd Webber musical premiered in the US on 10th December 1993?,ERROR,Sunset Boulevard,0.0,0.0
+Who was the next British Prime Minister after Arthur Balfour?,ERROR,Campbell-Bannerman,0.0,0.0
+Who had a 70s No 1 hit with Kiss You All Over?,ERROR,Exile,0.0,0.0
+What claimed the life of singer Kathleen Ferrier?,ERROR,Cancer,0.0,0.0
+Rita Coolidge sang the title song for which Bond film?,ERROR,Octopussy,0.0,0.0
+What was the last US state to reintroduce alcohol after prohibition?,ERROR,Utah,0.0,0.0
+Which actress was voted Miss Greenwich Village in 1942?,ERROR,Lauren Bacall,0.0,0.0
+What is the Japanese share index called?,ERROR,Nikkei,0.0,0.0
+What was the name of Michael Jackson's autobiography written in 1988?,ERROR,Moonwalk,0.0,0.0
+In which decade did stereo records first go on sale?,ERROR,1930s,0.0,0.0
+In what year's Olympics were electric timing devices and a public-address system used for the first time?,ERROR,"In 1912, in Stockholm",0.0,0.0
+Which volcano in Tanzania is the highest mountain in Africa?,ERROR,Kilimanjaro,0.0,0.0
+The flag of Libya is a plain rectangle of which color?,ERROR,Green,0.0,0.0
+Of which African country is Niamey the capital?,ERROR,Niger,0.0,0.0
+Who was the director of the CIA from 1976-81?,ERROR,George Bush,0.0,0.0
+Which musical featured the song The Street Where You Live?,ERROR,My Fair Lady,0.0,0.0
+"""Who was the target of the failed """"Bomb Plot"""" of 1944?""",ERROR,Hitler,0.0,0.0
+Who had an 80s No 1 hit with Hold On To The Nights?,ERROR,Richard Marx,0.0,0.0
+Who directed the classic 30s western Stagecoach?,ERROR,John Ford,0.0,0.0
