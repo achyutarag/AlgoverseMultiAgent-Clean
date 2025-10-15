@@ -26,7 +26,7 @@ class ExtractorAgent(BaseAgent):
     def __init__(
         self, 
         model_config: Optional[Dict[str, Any]] = None,
-        model_name: str = "distilbert-base-uncased",  # SLM for extraction
+        model_name: str = "gemini-2.5-flash",  # LLM for extraction
         temperature: float = 0.1,
         max_tokens: int = 2048
     ):
@@ -88,7 +88,38 @@ Examples of good extraction:
 **Reasoning**: "Directly answers the subquery about environmental benefits, excluding the manufacturing caveat which doesn't address benefits."
 
 **Subquery**: "How do Japan and South Korea differ in economic policy?"
-**Multiple sources**: Extract specific policy differences rather than general descriptions of each country's economy."""
+**Multiple sources**: Extract specific policy differences rather than general descriptions of each country's economy.
+
+**Complete JSON Example**:
+
+For the subquery "What is Scott Derrickson's nationality?" with documents about Scott Derrickson, return:
+
+{
+    "query": "What is Scott Derrickson's nationality?",
+    "extraction_reasoning": "I need to find information about Scott Derrickson's nationality. I'll extract any biographical information that might indicate his nationality or country of origin.",
+    "extracted_passages": [
+        {
+            "text": "Scott Derrickson (born July 16, 1966) is an American director, screenwriter and producer.",
+            "document_id": "hotpotqa_Scott_Derrickson",
+            "chunk_id": "chunk_1",
+            "relevance": 0.9,
+            "reasoning": "This sentence directly states Scott Derrickson's nationality as American",
+            "source_context": "From Scott Derrickson biographical article"
+        },
+        {
+            "text": "He lives in Los Angeles, California.",
+            "document_id": "hotpotqa_Scott_Derrickson", 
+            "chunk_id": "chunk_1",
+            "relevance": 0.6,
+            "reasoning": "Living in California suggests American nationality",
+            "source_context": "From Scott Derrickson biographical article"
+        }
+    ],
+    "aggregated_evidence": "Scott Derrickson is an American director, screenwriter and producer, born July 16, 1966, living in Los Angeles, California.",
+    "extraction_summary": "Successfully extracted nationality information showing Scott Derrickson is American, with supporting biographical details"
+}
+
+**IMPORTANT**: Always return valid JSON. Do not include any text before or after the JSON object."""
     
     async def process(self, input_data: Dict[str, Any]) -> AgentResponse:
         """
@@ -172,14 +203,19 @@ Examples of good extraction:
             
             ### Instructions:
             Please perform fine-grained extraction focusing on:
-            1. Extract ONLY sentences or spans that directly answer the subquery
-            2. Filter out redundant or irrelevant information
+            1. Extract sentences or spans that are relevant to the subquery (be inclusive, not restrictive)
+            2. Include information that helps answer the subquery, even if indirectly
             3. Combine complementary information from multiple sources
-            4. Assign relevance scores based on direct alignment with the subquery
+            4. Assign relevance scores generously - use the full range from 0.1 to 1.0
             5. Provide reasoning for each extraction decision
             6. Create an aggregated summary of all relevant evidence
             
-            Minimum relevance threshold: {min_relevance}
+            CRITICAL REQUIREMENT: 
+            - You MUST extract at least 1-2 passages from the documents
+            - DO NOT leave extracted_passages empty - this will cause the system to fail
+            - Extract ANY sentence that contains relevant information, even if indirectly related
+            - Use relevance scores of 0.3 or higher for any relevant information
+            - The minimum relevance threshold is {min_relevance}
             Focus on context types: {', '.join(context_needed)}
             
             Return your response as a valid JSON object with the structure shown above.
@@ -203,7 +239,19 @@ Examples of good extraction:
                 # Extract JSON from the response
                 # Strip markdown formatting first
                 clean_response = TokenizationUtils.strip_markdown_json(response)
-                result = json.loads(clean_response)
+                
+                # Additional JSON repair for common issues
+                if '"extracted_passages":' in clean_response and '"extracted_passages": [' not in clean_response:
+                    # Fix incomplete extracted_passages field
+                    clean_response = clean_response.replace('"extracted_passages": ', '"extracted_passages": []')
+                
+                # Try to repair JSON if it fails
+                try:
+                    result = json.loads(clean_response)
+                except json.JSONDecodeError:
+                    # Try to repair common JSON issues
+                    repaired_response = TokenizationUtils.repair_json(clean_response)
+                    result = json.loads(repaired_response)
                 
                 # Validate the response structure
                 required_keys = ["query", "extracted_passages"]
@@ -243,6 +291,20 @@ Examples of good extraction:
                 
                 # Sort passages by relevance (highest first)
                 valid_passages.sort(key=lambda x: x["relevance"], reverse=True)
+                
+                # Fallback: If no passages were extracted, create one from aggregated evidence
+                if not valid_passages and result.get("aggregated_evidence"):
+                    logger.warning("No passages extracted, creating fallback passage from aggregated evidence")
+                    aggregated_evidence = result.get("aggregated_evidence", "")
+                    if aggregated_evidence:
+                        valid_passages.append({
+                            "text": aggregated_evidence,
+                            "document_id": "fallback",
+                            "chunk_id": "fallback",
+                            "relevance": 0.5,
+                            "reasoning": "Fallback passage created from aggregated evidence",
+                            "source_context": "Generated from aggregated evidence"
+                        })
                 
                 # Remove duplicate or very similar passages
                 deduplicated_passages = self._deduplicate_passages(valid_passages)

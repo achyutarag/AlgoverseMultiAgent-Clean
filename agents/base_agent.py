@@ -15,9 +15,10 @@ class BaseAgent(ABC):
         self, 
         name: str, 
         model_config: Optional[Union[Dict[str, Any], LLMConfig]] = None,
-        model_name: str = "gemini-2.5-pro-preview-03-25"  # Default model
+        model_name: str = "gemini-2.5-flash"  # Default model
     ):
         self.name = name
+        self.model_name = model_name  # Store model name
         self.history: List[Dict[str, str]] = []
         
         # Set up LLM
@@ -30,6 +31,8 @@ class BaseAgent(ABC):
                 "use_quantization": True,
                 "load_in_4bit": True
             }
+        elif isinstance(model_config, dict) and "model_name" in model_config:
+            self.model_name = model_config["model_name"]
         
         self.llm = get_llm(model_config)
     
@@ -85,5 +88,14 @@ class BaseAgent(ABC):
         Returns:
             Generated text
         """
-        response = await self.llm.generate(prompt, **kwargs)
-        return response.text
+        try:
+            response = await self.llm.generate(prompt, **kwargs)
+            return response.text
+        except Exception as e:
+            error_msg = str(e)
+            if "quota" in error_msg.lower() or "rate limit" in error_msg.lower():
+                raise Exception(f"API quota exceeded. Please wait before retrying. Original error: {error_msg}")
+            elif "404" in error_msg and "not found" in error_msg.lower():
+                raise Exception(f"Model not found or not supported. Please check model configuration. Original error: {error_msg}")
+            else:
+                raise Exception(f"Error in text generation: {error_msg}")

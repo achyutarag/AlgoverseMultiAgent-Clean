@@ -14,6 +14,7 @@ from .qa_agent import QAAgent
 from .state_manager import StateManager
 from .final_assembler import FinalAssembler
 from .orchestrator import MARAGOrchestrator, PipelineResult
+from langchain.schema import Document
 
 logger = logging.getLogger(__name__)
 
@@ -28,14 +29,17 @@ class MixedModelOrchestrator(MARAGOrchestrator):
     
     def __init__(
         self,
+        # Documents for retrieval
+        documents: Optional[List[Document]] = None,
+        
         # SLM models for retrieval and extraction
         retrieval_model: str = "all-MiniLM-L6-v2",
-        extraction_model: str = "distilbert-base-uncased",
+        extraction_model: str = "gemini-2.5-flash",
         
         # LLM models for reasoning tasks
-        planning_model: str = "gemini-2.5-pro-preview-03-25",
-        step_definition_model: str = "gemini-2.5-pro-preview-03-25", 
-        qa_model: str = "gemini-2.5-pro-preview-03-25",
+        planning_model: str = "gemini-2.5-flash",
+        step_definition_model: str = "gemini-2.5-flash", 
+        qa_model: str = "gemini-2.5-flash",
         
         # Model configurations
         slm_config: Optional[Dict[str, Any]] = None,
@@ -49,12 +53,13 @@ class MixedModelOrchestrator(MARAGOrchestrator):
         max_steps: int = 5,
         max_subqueries: int = 3,
         top_k: int = 5,
-        min_similarity: float = 0.6
+        min_similarity: float = 0.3
     ):
         """
         Initialize the Mixed Model Orchestrator with optimal SLM/LLM configuration.
         
         Args:
+            documents: List of Document objects for the retriever agent
             retrieval_model: SLM model for document retrieval
             extraction_model: SLM model for text extraction
             planning_model: LLM model for query planning
@@ -94,6 +99,7 @@ class MixedModelOrchestrator(MARAGOrchestrator):
         
         # SLM Agents (fast, efficient)
         retriever_agent = RetrieverAgent(
+            documents=documents,  # Pass documents to retriever
             model_name=retrieval_model,
             model_config=slm_config,
             top_k=top_k,
@@ -226,15 +232,28 @@ class MixedModelOrchestrator(MARAGOrchestrator):
             },
             "recommendation": "SLMs for retrieval/extraction, LLMs for reasoning tasks"
         }
+    
+    def add_documents(self, documents: List[Document]):
+        """
+        Add documents to the retriever agent's vector store.
+        
+        Args:
+            documents: List of Document objects to add
+        """
+        if documents:
+            self.retriever.add_documents(documents)
+            logger.info(f"Added {len(documents)} documents to retriever agent")
+        else:
+            logger.warning("No documents provided to add")
 
 
 # Convenience functions for easy usage
 async def create_optimized_marag_pipeline(
     retrieval_model: str = "all-MiniLM-L6-v2",
     extraction_model: str = "distilbert-base-uncased",
-    planning_model: str = "gemini-2.5-pro-preview-03-25",
-    step_definition_model: str = "gemini-2.5-pro-preview-03-25",
-    qa_model: str = "gemini-2.5-pro-preview-03-25",
+    planning_model: str = "gemini-2.5-flash",
+    step_definition_model: str = "gemini-2.5-flash",
+    qa_model: str = "gemini-2.5-flash",
     **kwargs
 ) -> MixedModelOrchestrator:
     """
@@ -264,9 +283,9 @@ async def run_optimized_marag_pipeline(
     query: str,
     retrieval_model: str = "all-MiniLM-L6-v2",
     extraction_model: str = "distilbert-base-uncased", 
-    planning_model: str = "gemini-2.5-pro-preview-03-25",
-    step_definition_model: str = "gemini-2.5-pro-preview-03-25",
-    qa_model: str = "gemini-2.5-pro-preview-03-25",
+    planning_model: str = "gemini-2.5-flash",
+    step_definition_model: str = "gemini-2.5-flash",
+    qa_model: str = "gemini-2.5-flash",
     context: Optional[Dict[str, Any]] = None,
     **kwargs
 ) -> PipelineResult:

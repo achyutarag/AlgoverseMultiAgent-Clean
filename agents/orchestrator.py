@@ -297,7 +297,14 @@ class MARAGOrchestrator:
             subqueries = subqueries_data.get("sub_queries", [])
             
             if not subqueries:
-                raise Exception("No subqueries generated")
+                # For simple steps, use the step description as a single query
+                logger.warning(f"No subqueries generated for step {step['id']}, using step description as query")
+                subqueries = [{
+                    "id": "default_sq",
+                    "query": step.get('description', step.get('objective', 'search for relevant information')),
+                    "purpose": step.get('objective', 'accomplish step goal'),
+                    "priority": 1
+                }]
             
             # 2. Retrieval Tool (for each subquery)
             logger.debug(f"Step {step['id']}: Executing retrieval for {len(subqueries)} subqueries...")
@@ -307,7 +314,7 @@ class MARAGOrchestrator:
                 retrieval_input = {
                     "query": subquery["query"],
                     "k": 5,  # Default retrieval count
-                    "min_similarity": 0.6
+                    "min_similarity": 0.3  # Lower similarity threshold
                 }
                 
                 retrieval_response = await self.retriever.process(retrieval_input)
@@ -327,7 +334,8 @@ class MARAGOrchestrator:
             extractor_input = {
                 "query": step["description"],
                 "documents": all_retrieved_docs,
-                "history": history
+                "history": history,
+                "min_relevance": 0.2  # Even lower relevance threshold
             }
             
             extractor_response = await self.extractor.process(extractor_input)

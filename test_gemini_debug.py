@@ -16,24 +16,30 @@ def test_gemini_api():
     # Load environment variables
     load_dotenv()
     
-    # Check if credentials are set
+    # Check for API key or credentials
+    api_key = os.getenv("GOOGLE_API_KEY")
     creds_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-    print(f"📁 Credentials path: {creds_path}")
     
-    if not creds_path:
-        print("❌ GOOGLE_APPLICATION_CREDENTIALS not set!")
+    if api_key:
+        print(f"🔑 Using API Key: {api_key[:10]}...{api_key[-4:]}")
+        genai.configure(api_key=api_key)
+        print("✅ Configured with API Key")
+    elif creds_path:
+        print(f"📁 Credentials path: {creds_path}")
+        if not os.path.exists(creds_path):
+            print(f"❌ Credentials file not found: {creds_path}")
+            return
+        print(f"✅ Credentials file exists: {creds_path}")
+        genai.configure()
+        print("✅ Configured with Service Account")
+    else:
+        print("❌ Neither GOOGLE_API_KEY nor GOOGLE_APPLICATION_CREDENTIALS set!")
+        print("Please set one in your .env file")
         return
-    
-    if not os.path.exists(creds_path):
-        print(f"❌ Credentials file not found: {creds_path}")
-        return
-    
-    print(f"✅ Credentials file exists: {creds_path}")
     
     try:
         # Configure Gemini
-        print("\n🔧 Configuring Gemini API...")
-        genai.configure()
+        print("\n🔧 Testing Gemini API...")
         print("✅ Gemini API configured successfully")
         
         # List available models
@@ -51,27 +57,32 @@ def test_gemini_api():
                 print(f"   Methods: {model.supported_generation_methods}")
             print()
         
-        # Test with a simple model
-        print("🧪 Testing with a simple model...")
+        # Test with Gemini 2.5 Flash
+        print("🧪 Testing with gemini-2.5-flash...")
         
-        # Try to find a model that supports generateContent
-        available_models = list(genai.list_models())
-        test_model = None
+        test_model = "gemini-2.5-flash"
         
-        for model in available_models:
-            if hasattr(model, 'supported_generation_methods'):
-                if 'generateContent' in model.supported_generation_methods:
-                    test_model = model.name
-                    break
-        
-        if test_model:
+        try:
             print(f"🎯 Testing with model: {test_model}")
             model = genai.GenerativeModel(test_model)
             
             response = model.generate_content("Hello! Can you say 'API test successful'?")
             print(f"✅ Response: {response.text}")
-        else:
-            print("❌ No models found that support generateContent")
+        except Exception as model_error:
+            print(f"❌ Error testing model: {model_error}")
+            print("Trying to find any available model...")
+            
+            # Fallback: Try to find any model that supports generateContent
+            available_models = list(genai.list_models())
+            for model in available_models:
+                if hasattr(model, 'supported_generation_methods'):
+                    if 'generateContent' in model.supported_generation_methods:
+                        test_model = model.name
+                        print(f"🎯 Found alternative model: {test_model}")
+                        model = genai.GenerativeModel(test_model)
+                        response = model.generate_content("Hello! Can you say 'API test successful'?")
+                        print(f"✅ Response: {response.text}")
+                        break
             
     except Exception as e:
         print(f"❌ Error: {e}")

@@ -436,6 +436,54 @@ class TokenizationUtils:
 
 
     @staticmethod
+    def repair_json(text: str) -> str:
+        """
+        Attempt to repair common JSON formatting issues from LLM responses.
+        This is a more aggressive repair than strip_markdown_json.
+        """
+        import re
+        import json
+        
+        # First try the standard cleanup
+        text = TokenizationUtils.strip_markdown_json(text)
+        
+        # Try to parse - if it works, return it
+        try:
+            json.loads(text)
+            return text
+        except:
+            pass
+        
+        # More aggressive repairs
+        # Check if the JSON looks incomplete (ends mid-sentence or mid-field)
+        text_stripped = text.rstrip()
+        if text_stripped and not text_stripped.endswith(('}', ']', '"', 'true', 'false', 'null')) and not text_stripped[-1].isdigit():
+            # Looks incomplete - try to close it properly
+            # Add closing quote if we're in a string
+            if text_stripped.count('"') % 2 == 1:
+                text += '"'
+        
+        # Fix incomplete arrays by ensuring balanced brackets
+        open_brackets = text.count('[')
+        close_brackets = text.count(']')
+        if open_brackets > close_brackets:
+            text += ']' * (open_brackets - close_brackets)
+        
+        # Fix incomplete objects by ensuring balanced braces
+        open_braces = text.count('{')
+        close_braces = text.count('}')
+        if open_braces > close_braces:
+            text += '}' * (open_braces - close_braces)
+        
+        # Try parsing again
+        try:
+            json.loads(text)
+            return text
+        except:
+            # If still failing, return the cleaned text anyway
+            return text
+    
+    @staticmethod
     def strip_markdown_json(text: str) -> str:
         """
         Robustly strip markdown formatting from JSON responses. Handles various markdown formats that LLMs might use.
@@ -472,18 +520,68 @@ class TokenizationUtils:
         
         # Find JSON boundaries if still wrapped in other text
         json_start = text.find('{')
-        json_end = text.rfind('}') + 1
+        if json_start < 0:
+            return text
         
-        if json_start >= 0 and json_end > json_start:
+        # Find the matching closing brace by counting braces
+        brace_count = 0
+        json_end = -1
+        for i in range(json_start, len(text)):
+            if text[i] == '{':
+                brace_count += 1
+            elif text[i] == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    json_end = i + 1
+                    break
+        
+        if json_end > json_start:
             text = text[json_start:json_end]
         
         # Fix common JSON issues
-        # Remove extra closing brackets/braces
-        while text.count('}') > text.count('{'):
-            text = text.rsplit('}', 1)[0] + '}'
+        import re
         
-        while text.count(']') > text.count('['):
+        # Fix malformed arrays where LLM skips the opening bracket
+        # Pattern: "field": , "next_field" or "field": , {
+        # Common fields that should be arrays
+        array_fields = ['steps', 'sub_queries', 'dependencies', 'sources', 'results']
+        
+        for field in array_fields:
+            # Only fix if it's truly malformed (has comma right after colon)
+            # Don't fix if there's actual content
+            # Fix: "field": , "something" -> "field": [], "something" (only if no content between)
+            text = re.sub(rf'"{field}"\s*:\s*,\s*"', f'"{field}": [], "', text)
+            # Fix: "field": , {{ -> "field": [{{ (only if comma immediately follows)
+            text = re.sub(rf'"{field}"\s*:\s*,\s*{{', f'"{field}": [{{', text)
+        
+        # Fix trailing commas before closing braces/brackets
+        text = re.sub(r',\s*}', '}', text)
+        text = re.sub(r',\s*]', ']', text)
+        
+        # Fix missing commas between array elements
+        text = re.sub(r'}\s*{', '}, {', text)
+        text = re.sub(r']\s*\[', '], [', text)
+        
+        # Fix double commas
+        text = re.sub(r',\s*,', ',', text)
+        
+        # Remove extra closing brackets/braces (with safety limit)
+        max_iterations = 100
+        iterations = 0
+        while text.count('}') > text.count('{') and iterations < max_iterations:
+            text = text.rsplit('}', 1)[0] + '}'
+            iterations += 1
+        
+        iterations = 0
+        while text.count(']') > text.count('[') and iterations < max_iterations:
             text = text.rsplit(']', 1)[0] + ']'
+            iterations += 1
+        
+        # Add missing opening brackets for arrays if needed
+        if text.count('[') < text.count(']'):
+            # Try to fix by adding opening brackets before "steps" or other array fields
+            text = re.sub(r'"steps"\s*:\s*{', '"steps": [{', text)
+            text = re.sub(r'"steps"\s*:\s*"', '"steps": ["', text)
         
         return text.strip()
 

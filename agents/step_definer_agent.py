@@ -25,7 +25,7 @@ class StepDefinerAgent(BaseAgent):
     def __init__(
         self, 
         model_config: Optional[Dict[str, Any]] = None,
-        model_name: str = "gemini-2.5-pro-preview-03-25",  # LLM for step definition
+        model_name: str = "gemini-2.5-flash",  # LLM for step definition
         max_subqueries: int = 3
     ):
         """
@@ -156,164 +156,200 @@ Examples of good subquery generation:
                     content = h.get('content', '')[:400]  # Truncate long content
                     prompt += f"\n{role}: {content}"
             
-            # Add the actual instruction
-            prompt += f"""
+            # Extract step information
+            step_id = step.get('id', 'unknown')
+            step_description = step.get('description', 'No description')
+            step_objective = step.get('objective', 'No objective')
+            original_query = plan.get('main_question', 'Unknown query')
             
-            ### Instructions:
-            Please generate specific sub-queries that would help accomplish the current step.
-            Consider what information is needed and how it contributes to the step's objective.
-            Focus on creating subqueries that are:
-            1. Specific enough for precise retrieval
-            2. Grounded in the context from previous steps
-            3. Aligned with the step's objective
-            4. Prioritized by importance
+            # First, get basic step info
+            basic_prompt = f"""Step: {step_description}
+Objective: {step_objective}
+Original Query: {original_query}
+
+Return a JSON object with basic info:
+{{
+    "step_id": "{step_id}",
+    "step_description": "{step_description}",
+    "reasoning": "brief reasoning about how to accomplish this step"
+}}
+
+Return ONLY the JSON."""
             
-            Generate up to {max_subqueries} subqueries, prioritizing the most important ones.
-            """
-            
-            # Generate the response using the LLM
-            response = await self.generate_text(
-                prompt,
+            basic_response = await self.generate_text(
+                basic_prompt,
                 temperature=0.3,
-                max_new_tokens=1536
+                max_new_tokens=512
             )
             
-            # Postprocess the LLM response
-            response = tokenization_utils.postprocess_answer(response, output_type="json")
+            basic_response = tokenization_utils.postprocess_answer(basic_response, output_type="json")
             
-            # Try to extract JSON from the response
             try:
-                # Strip markdown formatting first
-                clean_response = TokenizationUtils.strip_markdown_json(response)
-                result = json.loads(clean_response)
-                
-                # Validate the response structure
-                required_keys = ["step_id", "step_description", "reasoning", "sub_queries"]
-                if not all(key in result for key in required_keys):
-                    raise ValueError(f"Missing required keys in response. Expected: {required_keys}")
-                
-                # Validate sub_queries structure
-                if not isinstance(result["sub_queries"], list):
-                    raise ValueError("sub_queries must be a list")
-                
-                # Limit subqueries to max_subqueries
-                result["sub_queries"] = result["sub_queries"][:max_subqueries]
-                
-                # Validate and enhance each subquery
-                validated_subqueries = []
-                for i, sq in enumerate(result["sub_queries"]):
-                    if not all(k in sq for k in ["id", "query", "purpose"]):
-                        logger.warning(f"Sub-query {i} is missing required fields, skipping")
-                        continue
-                    
-                    # Add priority if not present
-                    if "priority" not in sq:
-                        sq["priority"] = i + 1
-                    
-                    # Add context_needed if not present
-                    if "context_needed" not in sq:
-                        sq["context_needed"] = ["factual"]  # Default context type
-                    
-                    validated_subqueries.append(sq)
-                
-                result["sub_queries"] = validated_subqueries
-                
-                # Add context_analysis if not present
-                if "context_analysis" not in result:
-                    result["context_analysis"] = "Analysis of relevant context from previous steps"
-                
-                # Update history
-                self._update_history("user", f"Define sub-queries for step: {step.get('id')}")
-                self._update_history("assistant", response)
-                
-                # Parse sub-queries into SubQuery objects
-                sub_queries = [
-                    SubQuery(
-                        id=sq.get("id", f"subq_{i+1}"),
-                        query=sq["query"],
-                        purpose=sq["purpose"],
-                        priority=int(sq.get("priority", i + 1)),
-                        context_needed=sq.get("context_needed", ["factual"])
-                    )
-                    for i, sq in enumerate(result["sub_queries"])
-                ]
-                
-                # Sort sub-queries by priority (ascending, so 1 comes first)
-                sub_queries.sort(key=lambda x: x.priority)
-                
-                return AgentResponse(
-                    content=json.dumps({
-                        "step_id": result["step_id"],
-                        "step_description": result["step_description"],
-                        "reasoning": result["reasoning"],
-                        "context_analysis": result["context_analysis"],
-                        "sub_queries": [sq.dict() for sq in sub_queries]
-                    }),
-                    metadata={
-                        "step_id": result["step_id"],
-                        "step_description": result["step_description"],
-                        "reasoning": result["reasoning"],
-                        "context_analysis": result["context_analysis"],
-                        "sub_queries": [sq.dict() for sq in sub_queries],
-                        "num_subqueries": len(sub_queries),
-                        "step_definer_parameters": {
-                            "max_subqueries": max_subqueries,
-                            "model": self.model_name,
-                            "temperature": 0.3
-                        }
-                    }
-                )
-                
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse LLM response as JSON: {e}")
-                
-                # Fallback: create a simple subquery
-                fallback_subquery = {
-                    "step_id": step.get("id", "unknown"),
-                    "step_description": step.get("description", "No description"),
-                    "reasoning": "Unable to parse detailed subqueries, using fallback approach",
-                    "context_analysis": "Limited context analysis due to parsing error",
-                    "sub_queries": [
-                        {
-                            "id": "subquery_1",
-                            "query": step.get("description", "Research relevant information"),
-                            "purpose": f"Accomplish step objective: {step.get('objective', 'Unknown objective')}",
-                            "priority": 1,
-                            "context_needed": ["factual"]
-                        }
-                    ]
-                }
-                
-                return AgentResponse(
-                    content=json.dumps(fallback_subquery),
-                    metadata={
-                        "step_id": step.get("id", "unknown"),
-                        "step_description": step.get("description", "No description"),
-                        "reasoning": "Fallback subquery due to parsing error",
-                        "context_analysis": "Limited analysis",
-                        "sub_queries": fallback_subquery["sub_queries"],
-                        "error": f"Failed to parse response: {str(e)}",
-                        "fallback": True
-                    }
-                )
-                
+                clean_basic = TokenizationUtils.repair_json(basic_response)
+                result = json.loads(clean_basic)
+                logger.info(f"Successfully parsed basic step info")
             except Exception as e:
-                logger.error(f"Error processing LLM response: {e}")
-                return AgentResponse(
-                    content=f"Error processing LLM response: {str(e)}",
-                    metadata={
-                        "error": "Response processing error",
-                        "exception": str(e),
-                        "llm_response": response
-                    }
+                logger.error(f"Failed to parse basic step info: {e}")
+                logger.error(f"Raw response: {basic_response[:200]}")
+                result = {
+                    "step_id": step_id,
+                    "step_description": step_description,
+                    "reasoning": "Generate sub-queries to accomplish this step"
+                }
+            
+            # Now generate sub-queries one by one
+            sub_queries = []
+            num_subqueries = min(2, max_subqueries)  # Generate 2 sub-queries
+            
+            for i in range(num_subqueries):
+                sq_num = i + 1
+                previous_sqs = "\n".join([f"Sub-query {j+1}: {sq['query']}" for j, sq in enumerate(sub_queries)])
+                
+                sq_prompt = f"""Step: {step_description}
+Objective: {step_objective}
+Original Query: {original_query}
+
+Previous sub-queries:
+{previous_sqs if previous_sqs else "None yet"}
+
+Generate sub-query {sq_num} to help accomplish this step. Return a JSON object:
+
+**Example**: For step "Find the nationality of Scott Derrickson", return:
+{{
+    "id": "sq_{sq_num}",
+    "query": "Scott Derrickson nationality American director",
+    "purpose": "Find Scott Derrickson's nationality or country of origin",
+    "priority": {sq_num},
+    "context_needed": ["factual"]
+}}
+
+Return ONLY the JSON object, no other text."""
+                
+                sq_response = await self.generate_text(
+                    sq_prompt,
+                    temperature=0.3,
+                    max_new_tokens=512
                 )
+                
+                sq_response = tokenization_utils.postprocess_answer(sq_response, output_type="json")
+                
+                try:
+                    # Clean and repair JSON
+                    clean_sq = TokenizationUtils.repair_json(sq_response)
+                    
+                    # Additional JSON repair for common issues
+                    if '"context_needed":' in clean_sq and '"context_needed": [' not in clean_sq:
+                        # Fix incomplete context_needed field
+                        clean_sq = clean_sq.replace('"context_needed": ', '"context_needed": ["factual"]')
+                    
+                    sq = json.loads(clean_sq)
+                    
+                    # Validate sub-query has required fields
+                    if all(k in sq for k in ["id", "query", "purpose"]):
+                        # Ensure context_needed is a list
+                        if "context_needed" not in sq or not isinstance(sq["context_needed"], list):
+                            sq["context_needed"] = ["factual"]
+                        
+                        sub_queries.append(sq)
+                        logger.info(f"Generated sub-query {sq_num}: {sq['query'][:50]}")
+                    else:
+                        logger.warning(f"Sub-query {sq_num} missing required fields: {list(sq.keys())}")
+                except Exception as e:
+                    logger.error(f"Failed to parse sub-query {sq_num}: {e}")
+                    logger.error(f"Raw sub-query response: {sq_response[:200]}")
+                    continue
+            
+            # Add sub-queries to result
+            result["sub_queries"] = sub_queries
+            logger.info(f"Generated {len(sub_queries)} sub-queries for step {step_id}")
+            
+            # Add context_analysis if not present
+            if "context_analysis" not in result:
+                result["context_analysis"] = "Analysis of relevant context from previous steps"
+            
+            # Update history
+            self._update_history("user", f"Define sub-queries for step: {step_id}")
+            self._update_history("assistant", json.dumps(result, indent=2))
+            
+            # Parse sub-queries into SubQuery objects
+            parsed_sub_queries = [
+                SubQuery(
+                    id=sq.get("id", f"subq_{i+1}"),
+                    query=sq["query"],
+                    purpose=sq["purpose"],
+                    priority=int(sq.get("priority", i + 1)),
+                    context_needed=sq.get("context_needed", ["factual"])
+                )
+                for i, sq in enumerate(result["sub_queries"])
+            ]
+            
+            # Sort sub-queries by priority (ascending, so 1 comes first)
+            parsed_sub_queries.sort(key=lambda x: x.priority)
+            
+            return AgentResponse(
+                content=json.dumps({
+                    "step_id": result["step_id"],
+                    "step_description": result["step_description"],
+                    "reasoning": result["reasoning"],
+                    "context_analysis": result["context_analysis"],
+                    "sub_queries": [sq.dict() for sq in parsed_sub_queries]
+                }),
+                metadata={
+                    "step_id": result["step_id"],
+                    "step_description": result["step_description"],
+                    "reasoning": result["reasoning"],
+                    "context_analysis": result["context_analysis"],
+                    "sub_queries": [sq.dict() for sq in parsed_sub_queries],
+                    "num_subqueries": len(parsed_sub_queries),
+                    "step_definer_parameters": {
+                        "max_subqueries": max_subqueries,
+                        "model": self.model_name,
+                        "temperature": 0.3
+                    }
+                }
+            )
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse LLM response as JSON: {e}")
+            
+            # Fallback: create a simple subquery
+            fallback_subquery = {
+                "step_id": step_id,
+                "step_description": step_description,
+                "reasoning": "Unable to parse detailed subqueries, using fallback approach",
+                "context_analysis": "Limited context analysis due to parsing error",
+                "sub_queries": [
+                    {
+                        "id": "subquery_1",
+                        "query": step_description,
+                        "purpose": f"Accomplish step objective: {step_objective}",
+                        "priority": 1,
+                        "context_needed": ["factual"]
+                    }
+                ]
+            }
+            
+            return AgentResponse(
+                content=json.dumps(fallback_subquery),
+                metadata={
+                    "step_id": step_id,
+                    "step_description": step_description,
+                    "reasoning": "Fallback subquery due to parsing error",
+                    "context_analysis": "Limited analysis",
+                    "sub_queries": fallback_subquery["sub_queries"],
+                    "error": f"Failed to parse response: {str(e)}",
+                    "fallback": True
+                }
+            )
                 
         except Exception as e:
-            logger.error(f"Error in StepDefinerAgent.process: {e}", exc_info=True)
+            logger.error(f"Error processing LLM response: {e}", exc_info=True)
+            logger.error(f"Step ID: {step_id}, Description: {step_description}")
             return AgentResponse(
-                content=f"Error generating sub-queries: {str(e)}",
+                content=f"Error processing LLM response: {str(e)}",
                 metadata={
-                    "error": "Processing error",
-                    "exception": str(e)
+                    "error": "Response processing error",
+                    "exception": str(e),
+                    "exception_type": type(e).__name__
                 }
             )

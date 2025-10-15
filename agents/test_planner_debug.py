@@ -3,11 +3,16 @@ Debug script to test the planner agent and see what Gemini is generating.
 This will help us understand the JSON parsing issue.
 """
 
+import sys
+import os
+# Add parent directory to path so we can import agents module
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import asyncio
 import json
-from .planner_agent import PlannerAgent
-from .llm_wrapper import get_llm, LLMConfig
-from .tokenization_utils import TokenizationUtils
+from agents.planner_agent import PlannerAgent
+from agents.llm_wrapper import get_llm, LLMConfig
+from agents.tokenization_utils import TokenizationUtils
 
 async def test_planner_debug():
     """Test the planner agent and see the raw response."""
@@ -18,7 +23,7 @@ async def test_planner_debug():
         # First, let's test the LLM directly to see the original response
         print("🔧 Testing LLM directly...")
         llm_config = LLMConfig(
-            model_name="gemini-2.5-pro-preview-03-25",
+            model_name="gemini-2.5-flash",
             model_type="google_gemini"
         )
         llm = get_llm(llm_config)

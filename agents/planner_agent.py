@@ -25,7 +25,7 @@ class PlannerAgent(BaseAgent):
     def __init__(
         self, 
         model_config: Optional[Dict[str, Any]] = None,
-        model_name: str = "gemini-2.5-pro-preview-03-25",  # LLM for complex planning
+        model_name: str = "gemini-2.5-flash",  # LLM for complex planning
         max_steps: int = 5
     ):
         """
@@ -39,23 +39,11 @@ class PlannerAgent(BaseAgent):
         super().__init__("planner_agent", model_config, model_name)
         self.max_steps = max_steps
         
-        self.system_prompt = """You are an expert planner specialized in query disambiguation and task decomposition for retrieval-augmented generation. Your task is to:
+        self.system_prompt = """You are a query planner. Create a step-by-step plan to answer the user's question.
 
-1. **Query Disambiguation**: Identify potential ambiguities or underspecified elements in the query and reformulate them into clearer sub-questions if necessary.
+CRITICAL: You MUST return a complete JSON object with ALL required fields, especially the "steps" array.
 
-2. **Task Decomposition**: For complex or multi-hop questions, create a structured plan P = {s1, s2, ..., sn} where each si denotes a reasoning subtask.
-
-3. **Chain-of-Thought Reasoning**: Use step-by-step reasoning to ensure interpretable decomposition that supports grounded reasoning in downstream modules.
-
-Guidelines for planning:
-- Break down complex queries into manageable, sequential steps
-- Identify dependencies between steps
-- Consider what specific information is needed for each step
-- Ensure each step can be executed independently when dependencies are met
-- Mark critical steps that are essential for answering the main question
-- Use clear, actionable descriptions for each step
-
-Return your response as a JSON object with this structure:
+Return your response as a JSON object with this EXACT structure:
 {
     "main_question": "The original question",
     "disambiguated_query": "Clarified version of the query if needed",
@@ -73,22 +61,37 @@ Return your response as a JSON object with this structure:
     ]
 }
 
-Examples of good step decomposition:
+IMPORTANT RULES:
+1. Always include at least 2-3 steps in the "steps" array
+2. Each step must have "id", "description", "objective", "dependencies", "critical", and "expected_output"
+3. Make steps simple and actionable
+4. The JSON must be complete and valid
 
-**Multi-hop question**: "What are the environmental impacts of renewable energy adoption in Germany?"
-- Step 1: Identify types of renewable energy used in Germany
-- Step 2: Research environmental benefits of each renewable energy type
-- Step 3: Investigate environmental challenges/concerns for each type
-- Step 4: Analyze Germany-specific environmental policies and regulations
-- Step 5: Synthesize findings into comprehensive environmental impact assessment
-
-**Comparative question**: "How do the economic policies of Japan and South Korea differ?"
-- Step 1: Research Japan's key economic policies
-- Step 2: Research South Korea's key economic policies  
-- Step 3: Compare monetary policies between the two countries
-- Step 4: Compare fiscal policies between the two countries
-- Step 5: Analyze differences in trade and industrial policies
-- Step 6: Synthesize comprehensive comparison"""
+Example for "Who created X?":
+{
+    "main_question": "Who created X?",
+    "disambiguated_query": "Identify the creator of X",
+    "reasoning": "Simple factual lookup requiring identification of creator",
+    "query_type": "simple",
+    "steps": [
+        {
+            "id": "step_1",
+            "description": "Search for information about X and its creator",
+            "objective": "Find who created X",
+            "dependencies": [],
+            "critical": true,
+            "expected_output": "Name of creator"
+        },
+        {
+            "id": "step_2",
+            "description": "Verify the creator information",
+            "objective": "Confirm accuracy",
+            "dependencies": ["step_1"],
+            "critical": true,
+            "expected_output": "Verified creator name"
+        }
+    ]
+}"""
         
     async def process(self, input_data: Dict[str, Any]) -> AgentResponse:
         """
@@ -117,116 +120,155 @@ Examples of good step decomposition:
             )
         
         try:
-            # Prepare the enhanced prompt with context (preprocess for LLM)
-            prompt = f"""{self.system_prompt}
+            # First, get basic plan info
+            basic_prompt = f"""Analyze this question: {query}
+
+Return a JSON object with ONLY these fields:
+{{
+    "main_question": "the original question",
+    "disambiguated_query": "clarified version",
+    "reasoning": "brief reasoning about how to answer",
+    "query_type": "simple"
+}}
+
+Return ONLY the JSON, nothing else."""
             
-            ### Query to Analyze:
-            {tokenization_utils.preprocess_llm_input(query)}
-            
-            ### Additional Context:
-            {json.dumps(context, indent=2) if context else "No additional context provided"}
-            
-            ### Instructions:
-            Please analyze this query and create a structured plan following the guidelines above.
-            Focus on:
-            1. Identifying any ambiguities in the query
-            2. Determining the query type (simple, multi-hop, comparative, analytical)
-            3. Creating a logical sequence of steps that will lead to a comprehensive answer
-            4. Ensuring each step is actionable and has clear objectives
-            
-            Remember to limit the plan to {max_steps} steps maximum."""
-            
-            # Generate the response using the LLM
-            response = await self.generate_text(
-                prompt,
-                temperature=0.2,  # Lower temperature for more consistent planning
-                max_new_tokens=2048
+            # Generate basic plan info
+            basic_response = await self.generate_text(
+                basic_prompt,
+                temperature=0.2,
+                max_new_tokens=512
             )
             
-            # Postprocess the LLM response
-            response = tokenization_utils.postprocess_answer(response, output_type="json")
+            basic_response = tokenization_utils.postprocess_answer(basic_response, output_type="json")
             
-            # Try to extract JSON from the response
             try:
-                # Strip markdown formatting first
-                clean_response = TokenizationUtils.strip_markdown_json(response)
-                result = json.loads(clean_response)
+                clean_basic = TokenizationUtils.repair_json(basic_response)
+                result = json.loads(clean_basic)
+            except Exception as e:
+                logger.error(f"Failed to parse basic plan: {e}")
+                # Create fallback
+                result = {
+                    "main_question": query,
+                    "disambiguated_query": query,
+                    "reasoning": "Direct factual lookup",
+                    "query_type": "simple"
+                }
+            
+            # Now generate steps one by one
+            steps = []
+            num_steps = min(3, max_steps)  # Generate 3 steps
+            
+            for i in range(num_steps):
+                step_num = i + 1
+                previous_steps = "\n".join([f"Step {j+1}: {s['description']}" for j, s in enumerate(steps)])
                 
-                # Validate the response structure
-                required_keys = ["main_question", "reasoning", "steps"]
-                if not all(key in result for key in required_keys):
-                    raise ValueError(f"Missing required keys in response. Expected: {required_keys}")
+                step_prompt = f"""Question: {query}
+
+Previous steps:
+{previous_steps if previous_steps else "None yet"}
+
+Generate step {step_num} to answer this question. Return a JSON object:
+{{
+    "id": "step_{step_num}",
+    "description": "what to do in this step",
+    "objective": "goal of this step",
+    "dependencies": {json.dumps([f"step_{j+1}" for j in range(i)]) if i > 0 else "[]"},
+    "critical": true,
+    "expected_output": "what this step should produce"
+}}
+
+Return ONLY the JSON."""
                 
-                # Validate steps structure
-                if not isinstance(result["steps"], list):
-                    raise ValueError("Steps must be a list")
-                
-                # Limit steps to max_steps
-                result["steps"] = result["steps"][:max_steps]
-                
-                # Validate and enhance each step
-                validated_steps = []
-                for i, step in enumerate(result["steps"]):
-                    if not all(k in step for k in ["id", "description", "objective"]):
-                        logger.warning(f"Step {i} is missing required fields, skipping")
-                        continue
-                    
-                    # Ensure dependencies is a list
-                    if "dependencies" not in step:
-                        step["dependencies"] = []
-                    elif not isinstance(step["dependencies"], list):
-                        step["dependencies"] = [step["dependencies"]]
-                    
-                    # Add critical flag if not present
-                    if "critical" not in step:
-                        step["critical"] = i == 0 or "synthesize" in step["description"].lower()
-                    
-                    # Add expected output if not present
-                    if "expected_output" not in step:
-                        step["expected_output"] = f"Information needed for: {step['objective']}"
-                    
-                    validated_steps.append(step)
-                
-                result["steps"] = validated_steps
-                
-                # Add disambiguated query if not present
-                if "disambiguated_query" not in result:
-                    result["disambiguated_query"] = result["main_question"]
-                
-                # Add query type if not present
-                if "query_type" not in result:
-                    query_lower = query.lower()
-                    if any(word in query_lower for word in ["compare", "difference", "vs", "versus"]):
-                        result["query_type"] = "comparative"
-                    elif any(word in query_lower for word in ["how", "why", "what", "when", "where"]):
-                        result["query_type"] = "multi-hop"
-                    elif any(word in query_lower for word in ["analyze", "analysis", "evaluate"]):
-                        result["query_type"] = "analytical"
-                    else:
-                        result["query_type"] = "simple"
-                
-                # Update history
-                self._update_history("user", f"Plan for: {query}")
-                self._update_history("assistant", json.dumps(result, indent=2))
-                
-                return AgentResponse(
-                    content=json.dumps(result, indent=2),
-                    metadata={
-                        "main_question": result["main_question"],
-                        "disambiguated_query": result["disambiguated_query"],
-                        "query_type": result["query_type"],
-                        "num_steps": len(result["steps"]),
-                        "reasoning": result["reasoning"],
-                        "steps": result["steps"],
-                        "planning_parameters": {
-                            "max_steps": max_steps,
-                            "model": self.model_name,
-                            "temperature": 0.2
-                        }
-                    }
+                step_response = await self.generate_text(
+                    step_prompt,
+                    temperature=0.2,
+                    max_new_tokens=512
                 )
                 
-            except (json.JSONDecodeError, ValueError) as e:
+                step_response = tokenization_utils.postprocess_answer(step_response, output_type="json")
+                
+                try:
+                    clean_step = TokenizationUtils.repair_json(step_response)
+                    step = json.loads(clean_step)
+                    
+                    # Validate step has required fields
+                    if all(k in step for k in ["id", "description", "objective"]):
+                        steps.append(step)
+                        logger.info(f"Generated step {step_num}: {step['description'][:50]}")
+                    else:
+                        logger.warning(f"Step {step_num} missing required fields, skipping")
+                except Exception as e:
+                    logger.warning(f"Failed to parse step {step_num}: {e}")
+                    continue
+            
+            # Add steps to result
+            result["steps"] = steps
+            logger.info(f"Generated plan with {len(steps)} steps")
+            
+            # Validate the response structure
+            required_keys = ["main_question", "reasoning", "steps"]
+            if not all(key in result for key in required_keys):
+                raise ValueError(f"Missing required keys in response. Expected: {required_keys}")
+            
+            # Validate steps structure
+            if not isinstance(result["steps"], list):
+                raise ValueError("Steps must be a list")
+            
+            # Enhance each step (they're already validated in the loop above)
+            for i, step in enumerate(result["steps"]):
+                # Ensure dependencies is a list
+                if "dependencies" not in step:
+                    step["dependencies"] = []
+                elif not isinstance(step["dependencies"], list):
+                    step["dependencies"] = [step["dependencies"]]
+                
+                # Add critical flag if not present
+                if "critical" not in step:
+                    step["critical"] = True
+                
+                # Add expected output if not present
+                if "expected_output" not in step:
+                    step["expected_output"] = f"Information needed for: {step['objective']}"
+            
+            # Add disambiguated query if not present
+            if "disambiguated_query" not in result:
+                result["disambiguated_query"] = result["main_question"]
+            
+            # Add query type if not present
+            if "query_type" not in result:
+                query_lower = query.lower()
+                if any(word in query_lower for word in ["compare", "difference", "vs", "versus"]):
+                    result["query_type"] = "comparative"
+                elif any(word in query_lower for word in ["how", "why", "what", "when", "where"]):
+                    result["query_type"] = "multi-hop"
+                elif any(word in query_lower for word in ["analyze", "analysis", "evaluate"]):
+                    result["query_type"] = "analytical"
+                else:
+                    result["query_type"] = "simple"
+            
+            # Update history
+            self._update_history("user", f"Plan for: {query}")
+            self._update_history("assistant", json.dumps(result, indent=2))
+            
+            return AgentResponse(
+                content=json.dumps(result, indent=2),
+                metadata={
+                    "main_question": result["main_question"],
+                    "disambiguated_query": result["disambiguated_query"],
+                    "query_type": result["query_type"],
+                    "num_steps": len(result["steps"]),
+                    "reasoning": result["reasoning"],
+                    "steps": result["steps"],
+                    "planning_parameters": {
+                        "max_steps": max_steps,
+                        "model": self.model_name,
+                        "temperature": 0.2
+                    }
+                }
+            )
+                
+        except (json.JSONDecodeError, ValueError) as e:
                 logger.error(f"Error parsing LLM response: {str(e)}")
                 logger.debug(f"Response content: {response}")
                 

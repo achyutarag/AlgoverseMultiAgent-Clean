@@ -35,7 +35,7 @@ class QAAgent(BaseAgent):
     def __init__(
         self, 
         model_config: Optional[Dict[str, Any]] = None,
-        model_name: str = "gemini-2.5-pro-preview-03-25",  # LLM for answer synthesis
+        model_name: str = "gemini-2.5-flash",  # LLM for answer synthesis
         temperature: float = 0.3,
         max_tokens: int = 1024
     ):
@@ -53,54 +53,30 @@ class QAAgent(BaseAgent):
         self.max_tokens = max(100, min(4096, max_tokens))
         self.conversation_history: List[Dict[str, str]] = []
         
-        self.system_prompt = """You are an expert at synthesizing answers using in-context learning with step-specific context. Your task is to:
+        self.system_prompt = """You are an expert at answering questions using provided evidence. 
 
-1. **Step-Specific Synthesis**: Generate answers that are tailored to the current step's objective and context
+Your task is to:
+1. Answer the question using ONLY the provided evidence
+2. Be concise and accurate
+3. Provide confidence scores based on evidence quality
+4. Return valid JSON
 
-2. **Evidence Integration**: Synthesize information from multiple extracted passages into coherent, well-structured answers
-
-3. **Grounded Reasoning**: Base your answers strictly on the provided evidence while maintaining logical coherence
-
-4. **Context Awareness**: Consider the broader context of the overall query and previous step results
-
-5. **Confidence Assessment**: Provide honest confidence scores based on the quality and completeness of available evidence
-
-Guidelines for answer generation:
-- Synthesize information from multiple sources when they complement each other
-- Address the specific subquery directly and comprehensively
-- Maintain logical flow and coherence in your reasoning
-- Include relevant details that support your main answer
-- Note any limitations or uncertainties in the available evidence
-- Provide clear reasoning for your conclusions
-- Rate confidence honestly based on evidence quality and completeness
-
-Format your response as a valid JSON object with this structure:
+Return a JSON object with this structure:
 {
-    "question": "The original subquery",
-    "answer": "Your comprehensive answer based on the evidence",
-    "confidence": 0.0-1.0,  // Your confidence in the answer
-    "reasoning": "Your step-by-step reasoning process",
-    "sources": ["doc1_id", "doc2_id"],  // IDs of sources used
+    "answer": "Your answer to the question",
+    "confidence": 0.95,
+    "reasoning": "Why you gave this answer",
+    "sources": ["source1", "source2"],
     "supporting_evidence": [
         {
-            "text": "Relevant passage from context",
-            "source": "source_document_id",
-            "relevance": 0.9  // How relevant this evidence is
+            "text": "Relevant text from evidence",
+            "source": "source_id",
+            "relevance": 0.9
         }
     ]
 }
 
-Examples of good answer synthesis:
-
-**Subquery**: "What are the environmental benefits of solar energy?"
-**Evidence**: Multiple passages about solar energy benefits
-**Answer**: "Solar energy provides several key environmental benefits: 1) Zero greenhouse gas emissions during operation, unlike fossil fuels; 2) Reduced air pollution from power generation; 3) Lower water usage compared to traditional power plants; 4) Minimal environmental impact during operation. However, manufacturing does require energy and materials."
-**Reasoning**: "Combined information from multiple sources to provide comprehensive overview of environmental benefits while noting limitations."
-
-**Subquery**: "How do Japan and South Korea differ in monetary policy?"
-**Evidence**: Specific policy details from both countries
-**Answer**: "Japan and South Korea differ significantly in their monetary policy approaches: Japan maintains ultra-low interest rates (near zero) with quantitative easing, while South Korea uses more conventional monetary policy with higher interest rates. Japan focuses on combating deflation, while South Korea targets inflation control."
-**Reasoning**: "Compared specific policy elements from both countries to highlight key differences."""
+**IMPORTANT**: Always return valid JSON. Do not include any text before or after the JSON object."""
     
     async def process(self, input_data: Dict[str, Any]) -> AgentResponse:
         """
@@ -246,13 +222,19 @@ Examples of good answer synthesis:
             # Log the QA request
             logger.info(f"Generating step-specific answer for subquery: {question[:100]}...")
             logger.debug(f"Using {len(context)} context items, min_confidence={min_confidence}")
+            logger.debug(f"Prompt length: {len(prompt)} characters")
             
             # Get the LLM response
             response = await self.generate_text(
                 prompt=prompt,
-                temperature=self.temperature,
-                max_new_tokens=self.max_tokens
+                temperature=self.temperature
             )
+            
+            logger.debug(f"LLM response length: {len(response)} characters")
+            logger.debug(f"LLM response preview: {response[:200]}...")
+            
+            if not response or not response.strip():
+                raise ValueError("Empty response from LLM")
             
             # Postprocess the LLM response
             response = tokenization_utils.postprocess_answer(response, output_type="json")
@@ -261,7 +243,28 @@ Examples of good answer synthesis:
                 # Extract JSON from the response
                 # Strip markdown formatting first
                 clean_response = TokenizationUtils.strip_markdown_json(response)
-                result = json.loads(clean_response)
+                
+                # Additional JSON repair for common issues
+                if '"sources":' in clean_response and '"sources": [' not in clean_response:
+                    # Fix incomplete sources field
+                    clean_response = clean_response.replace('"sources": ', '"sources": []')
+                
+                if '"supporting_evidence":' in clean_response and '"supporting_evidence": [' not in clean_response:
+                    # Fix incomplete supporting_evidence field
+                    clean_response = clean_response.replace('"supporting_evidence": ', '"supporting_evidence": []')
+                
+                # Try to repair JSON if it fails
+                try:
+                    result = json.loads(clean_response)
+                except json.JSONDecodeError:
+                    # Try to repair common JSON issues
+                    repaired_response = TokenizationUtils.repair_json(clean_response)
+                    result = json.loads(repaired_response)
+                
+                # Validate the response structure
+                required_keys = ["answer"]
+                if not all(key in result for key in required_keys):
+                    raise ValueError("Missing required fields in response")
                 
                 # Parse the response
                 supporting_evidence = [
@@ -325,7 +328,7 @@ Examples of good answer synthesis:
                 }
                 
                 return AgentResponse(
-                    content=answer.json(ensure_ascii=False, indent=2),
+                    content=answer.model_dump_json(),
                     metadata=metadata
                 )
                 
@@ -356,7 +359,7 @@ Examples of good answer synthesis:
                 )
                 
                 return AgentResponse(
-                    content=fallback_answer.json(ensure_ascii=False, indent=2),
+                    content=fallback_answer.model_dump_json(),
                     metadata={
                         "question": question,
                         "confidence": 0.3,
@@ -393,21 +396,6 @@ Examples of good answer synthesis:
                 }
             )
     
-    async def generate_text(self, prompt: str, temperature: float, max_new_tokens: int) -> str:
-        """
-        Generate text using the LLM.
-        
-        Args:
-            prompt: The prompt to generate text from
-            temperature: Temperature for text generation (0.0-1.0)
-            max_new_tokens: Maximum number of tokens to generate
-            
-        Returns:
-            Generated text
-        """
-        # This is a placeholder implementation that should be overridden by a real LLM call
-        # In a real implementation, this would call the actual LLM API
-        return ""
     
     async def generate_followup_questions(
         self, 
@@ -476,8 +464,7 @@ Examples of good answer synthesis:
             # Get the LLM response
             response = await self.generate_text(
                 prompt=prompt,
-                temperature=min(0.7, self.temperature + 0.1),  # Slightly more creative
-                max_new_tokens=512
+                temperature=min(0.7, self.temperature + 0.1)  # Slightly more creative
             )
             
             # Parse the response

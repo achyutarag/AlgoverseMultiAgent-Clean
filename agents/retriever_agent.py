@@ -1,7 +1,8 @@
 from typing import Dict, Any, List, Optional, Union
 from pydantic import BaseModel, Field
 from langchain.schema import Document
-from langchain.vectorstores import FAISS
+from langchain_community.vectorstores import FAISS
+from langchain.embeddings.base import Embeddings
 from sentence_transformers import SentenceTransformer
 from .base_agent import BaseAgent, AgentResponse
 import numpy as np
@@ -12,8 +13,8 @@ import re
 
 logger = logging.getLogger(__name__)
 
-class LocalEmbeddings:
-    """Wrapper for local embedding models with preprocessing."""
+class LocalEmbeddings(Embeddings):
+    """FAISS-compatible wrapper for local embedding models with preprocessing."""
     
     def __init__(self, model_name: str = "all-MiniLM-L6-v2", device: str = None):
         """
@@ -23,6 +24,7 @@ class LocalEmbeddings:
             model_name: Name of the SentenceTransformer model to use
             device: Device to run the model on ('cuda', 'mps', 'cpu')
         """
+        super().__init__()
         self.model = SentenceTransformer(model_name, device=device)
         self.model_name = model_name
         self.model.eval()
@@ -43,7 +45,8 @@ class LocalEmbeddings:
     def embed_query(self, text: str) -> List[float]:
         """Embed a single query with preprocessing."""
         processed_text = self._preprocess_text(text)
-        return self.embed_documents([processed_text])[0]
+        embeddings = self.model.encode([processed_text], convert_to_numpy=True)
+        return embeddings[0].tolist()
     
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """Embed multiple documents with preprocessing."""
@@ -53,8 +56,9 @@ class LocalEmbeddings:
         # Preprocess all texts
         processed_texts = [self._preprocess_text(text) for text in texts]
         
-        # Convert to numpy array and then to list for compatibility
-        return self.model.encode(processed_texts, convert_to_numpy=True).tolist()
+        # Return numpy array for FAISS compatibility
+        embeddings = self.model.encode(processed_texts, convert_to_numpy=True)
+        return embeddings.tolist()
     
     def __call__(self, texts: Union[str, List[str]]) -> List[List[float]]:
         """Alias for embed_documents for compatibility."""

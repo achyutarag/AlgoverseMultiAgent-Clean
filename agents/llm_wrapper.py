@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class LLMConfig(BaseModel):
     """Configuration for LLM models."""
-    model_name: str = "gemini-2.5-pro-preview-03-25"
+    model_name: str = "gemini-2.5-flash"
     model_type: str = "google_gemini"  # google_gemini, huggingface, etc.
     device: str = "auto"  # auto, cuda, cpu, mps
     temperature: float = 0.7
@@ -70,16 +70,26 @@ class GoogleGeminiLLM(BaseLLMWrapper):
             from dotenv import load_dotenv
             load_dotenv()
 
-            # Set up service account authentication
+            # Try API key first, then fall back to service account
+            api_key = os.getenv("GOOGLE_API_KEY")
             credentials_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
-            if not credentials_path:
-                raise ValueError("GOOGLE_APPLICATION_CREDENTIALS not set in .env file")
-
-            # Set the environment variable for Google Cloud authentication
-            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_path
             
-            # Configure Gemini (no credentials parameter needed - it uses env var)
-            genai.configure()
+            if api_key:
+                # Configure Gemini with API key
+                genai.configure(api_key=api_key)
+                logger.info("Using Google API Key for authentication")
+            elif credentials_path:
+                # Set up service account authentication
+                if not os.path.exists(credentials_path):
+                    raise ValueError(f"Credentials file not found: {credentials_path}")
+                os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_path
+                genai.configure()
+                logger.info("Using Service Account for authentication")
+            else:
+                raise ValueError(
+                    "Neither GOOGLE_API_KEY nor GOOGLE_APPLICATION_CREDENTIALS set in .env file. "
+                    "Please set one of these environment variables."
+                )
             
             # Load Gemini model
             self.model = genai.GenerativeModel(self.config.model_name)
@@ -213,7 +223,7 @@ if __name__ == "__main__":
     
     # Example with Google Gemini model
     gemini_config = {
-        "model_name": "gemini-2.5-pro-preview-03-25",
+        "model_name": "gemini-2.5-flash",
         "model_type": "google_gemini",
         "device": "auto",
         "temperature": 0.7,
