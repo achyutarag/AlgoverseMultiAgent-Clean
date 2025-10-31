@@ -19,7 +19,7 @@ class LLMConfig(BaseModel):
     device: str = "auto"  # auto, cuda, cpu, mps
     temperature: float = 0.7
     max_new_tokens: int = 1024
-    context_length: int = 4096
+    context_length: int = 8192
     use_quantization: bool = True
     load_in_4bit: bool = True
     use_flash_attention: bool = False

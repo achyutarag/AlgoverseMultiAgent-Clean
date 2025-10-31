@@ -32,7 +32,7 @@ class MixedModelOrchestrator(MARAGOrchestrator):
         # Documents for retrieval
         documents: Optional[List[Document]] = None,
         
-        # SLM models for retrieval and extraction
+        # SLM models for retrieval and extraction   #for multihop reasoning, 
         retrieval_model: str = "all-MiniLM-L6-v2",
         extraction_model: str = "gemini-2.5-flash",
         
@@ -50,10 +50,10 @@ class MixedModelOrchestrator(MARAGOrchestrator):
         timeout_seconds: int = 300,
         
         # Agent-specific parameters
-        max_steps: int = 5,
-        max_subqueries: int = 3,
-        top_k: int = 5,
-        min_similarity: float = 0.3
+        max_steps: int = 7,
+        max_subqueries: int = 5,
+        top_k: int = 10,
+        min_similarity: float = 0.2
     ):
         """
         Initialize the Mixed Model Orchestrator with optimal SLM/LLM configuration.
@@ -232,7 +232,7 @@ class MixedModelOrchestrator(MARAGOrchestrator):
             },
             "recommendation": "SLMs for retrieval/extraction, LLMs for reasoning tasks"
         }
-    
+    #
     def add_documents(self, documents: List[Document]):
         """
         Add documents to the retriever agent's vector store.

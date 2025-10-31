@@ -5,6 +5,7 @@ import re
 import string
 from datasets import load_dataset
 from typing import Dict, Any, List
+from agents.hotpotqa_document_loader import load_hotpotqa_context_as_documents
 from agents.mixed_model_orchestrator import run_optimized_marag_pipeline
 
 def normalize_text(text: str) -> str:
@@ -70,9 +71,13 @@ async def evaluate_dataset(dataset_name: str, dataset_name_full: str, dataset_co
         print(f"Ground Truth: {ground_truth}")
         
         try:
-            # Run through MA-RAG pipeline
+            # Load documents first
+            print("Loading documents...")
+            documents = load_hotpotqa_context_as_documents("validation", num_examples=100)
+            
+            # Run through MA-RAG pipeline with documents
             print("Running through MA-RAG pipeline...")
-            result = await run_optimized_marag_pipeline(question)
+            result = await run_optimized_marag_pipeline(question, documents=documents)
             
             # Extract final answer from pipeline result
             if hasattr(result, 'content'):

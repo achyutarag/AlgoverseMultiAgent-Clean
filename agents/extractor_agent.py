@@ -27,7 +27,7 @@ class ExtractorAgent(BaseAgent):
         self, 
         model_config: Optional[Dict[str, Any]] = None,
         model_name: str = "gemini-2.5-flash",  # LLM for extraction
-        temperature: float = 0.1,
+        temperature: float = 0.3,
         max_tokens: int = 2048
     ):
         """
@@ -140,8 +140,8 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
         query = input_data.get('query', '').strip()
         documents = input_data.get('documents', [])
         history = input_data.get('history', [])
-        max_documents = min(int(input_data.get('max_documents', 5)), 10)  # Cap at 10 documents
-        min_relevance = max(0.0, min(1.0, float(input_data.get('min_relevance', 0.5))))
+        max_documents = min(int(input_data.get('max_documents', 8)), 15)  # Cap at 15 documents
+        min_relevance = max(0.0, min(1.0, float(input_data.get('min_relevance', 0.3))))
         context_needed = input_data.get('context_needed', ['factual'])
         
         # Normalize query for consistent processing
@@ -474,7 +474,7 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
         return passages[:5]
     
     @staticmethod
-    def chunk_document(document: Dict[str, Any], chunk_size: int = 500, overlap: int = 50) -> List[Dict[str, Any]]:
+    def chunk_document(document: Dict[str, Any], chunk_size: int = 1200, overlap: int = 50) -> List[Dict[str, Any]]:
         """
         Split a document into overlapping chunks.
         

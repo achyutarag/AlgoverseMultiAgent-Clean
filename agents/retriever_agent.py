@@ -79,7 +79,7 @@ class RetrieverAgent(BaseAgent):
         model_name: str = "all-MiniLM-L6-v2",
         device: str = None,
         top_k: int = 5,
-        min_similarity: float = 0.6,
+        min_similarity: float = 0.2,
         batch_size: int = 32
     ):
         """
