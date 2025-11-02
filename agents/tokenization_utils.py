@@ -137,7 +137,8 @@ class TokenizationUtils:
             answer = self._clean_text_output(answer)
         
         # Step 3: Remove unwanted tokens and artifacts
-        answer = self._remove_artifacts(answer)
+        if output_type != "json":  # ← Add this condition
+            answer = self._remove_artifacts(answer)
         
         # Step 4: Final validation
         answer = self._validate_output(answer)

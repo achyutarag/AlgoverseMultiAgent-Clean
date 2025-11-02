@@ -54,7 +54,8 @@ class ExtractorAgent(BaseAgent):
 4. **Context Efficiency**: Address the "lost-in-the-middle" issue by focusing on the most relevant information
 
 Guidelines for extraction:
-- Extract ONLY sentences or spans that directly answer the subquery
+- Extract sentences or spans that answer the subquery (directly or indirectly)
+- ALWAYS populate the extracted_passages array - never return empty array
 - Preserve important context needed to understand the extracted information
 - Combine information from multiple sources when they complement each other
 - Assign relevance scores based on how directly the content addresses the subquery
@@ -206,6 +207,34 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
             # Add extraction instructions
             prompt += f"""
             
+            ### CRITICAL REQUIREMENTS (MUST FOLLOW - READ FIRST):  
+            - ⚠️ You MUST populate the "extracted_passages" array with at least 1-2 passages
+            - ⚠️ DO NOT return an empty "extracted_passages": [] - this will cause system failure
+            - ⚠️ Extract specific sentences or spans from the documents - use the EXACT text from documents above
+            - ⚠️ If you create aggregated_evidence, you MUST also extract at least 1-2 individual passages
+            - Extract ANY sentence that contains relevant information, even if indirectly related
+            - Use relevance scores of 0.3 or higher for any relevant information (minimum threshold: {min_relevance})
+            - Focus on context types: {', '.join(context_needed)}
+
+            ### ❌ WRONG - DO NOT DO THIS:
+            {{
+                "extracted_passages": []  // ❌ NEVER return empty array
+            }}
+
+            ### ✅ CORRECT - ALWAYS DO THIS:
+            {{
+                "extracted_passages": [
+                    {{
+                        "text": "Exact sentence from document",
+                        "document_id": "doc_1",
+                        "chunk_id": "chunk_1",
+                        "relevance": 0.8,
+                        "reasoning": "This directly answers the query",
+                        "source_context": "From document context"
+                    }}
+                ]
+            }}
+        
             ### Instructions:
             Please perform fine-grained extraction focusing on:
             1. Extract sentences or spans that are relevant to the subquery (be inclusive, not restrictive)
@@ -214,14 +243,13 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
             4. Assign relevance scores generously - use the full range from 0.1 to 1.0
             5. Provide reasoning for each extraction decision
             6. Create an aggregated summary of all relevant evidence
+
+            ### FINAL REMINDER BEFORE RETURNING JSON:
+            1. Check that "extracted_passages" array has at least 1-2 items
+            2. If extracted_passages is empty, your response is INVALID
+            3. Extract exact text from the documents provided above
+            4. Do NOT summarize - extract specific passages
             
-            CRITICAL REQUIREMENT: 
-            - You MUST extract at least 1-2 passages from the documents
-            - DO NOT leave extracted_passages empty - this will cause the system to fail
-            - Extract ANY sentence that contains relevant information, even if indirectly related
-            - Use relevance scores of 0.3 or higher for any relevant information
-            - The minimum relevance threshold is {min_relevance}
-            Focus on context types: {', '.join(context_needed)}
             
             Return your response as a valid JSON object with the structure shown above.
             """
@@ -236,6 +264,34 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
                 temperature=self.temperature,
                 max_new_tokens=self.max_tokens
             )
+            # We will show the following for DEBUGGING:
+            #1) The Exact raw response of the LLM
+            #2) How postprocessing changed it
+            #3) Whether the issue is in the LLM output or in processing
+
+            # DEBUG: Log raw LLM response BEFORE any processing
+            logger.debug("=" * 80)
+            logger.debug("RAW LLM RESPONSE (BEFORE POSTPROCESSING):")
+            logger.debug("=" * 80)
+            logger.debug(f"Response type: {type(response)}")
+            logger.debug(f"Response length: {len(str(response))} characters")
+            logger.debug(f"Full response:\n{response}")
+            logger.debug("=" * 80)
+
+            # Postprocess the LLM response
+            response = tokenization_utils.postprocess_answer(response, output_type="json")
+
+            # DEBUG: Log response AFTER postprocessing
+            logger.debug("=" * 80)
+            logger.debug("LLM RESPONSE AFTER POSTPROCESSING:")
+            logger.debug("=" * 80)
+            logger.debug(f"Response after postprocess:\n{response}")
+            logger.debug("=" * 80)
+
+            #DEBUG: check for response length and preview
+
+            logger.debug(f"LLM response length: {len(response)} characters")
+            logger.debug(f"LLM response preview: {response[:200]}...")
             
             # Postprocess the LLM response
             response = tokenization_utils.postprocess_answer(response, output_type="json")
@@ -263,6 +319,10 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
                 if not all(key in result for key in required_keys):
                     raise ValueError("Missing required fields in response")
                 
+                # DEBUG: Log what the LLM actually returned
+                logger.debug(f"LLM returned {len(result.get('extracted_passages', []))} passages before validation")
+                logger.debug(f"Raw extracted_passages: {result.get('extracted_passages', [])}")
+                
                 # Validate and filter extracted passages
                 valid_passages = []
                 for i, passage in enumerate(result["extracted_passages"]):
@@ -274,11 +334,15 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
                         # Ensure relevance is a float between 0 and 1
                         relevance = float(passage.get("relevance", 0.0))
                         if relevance < min_relevance:
+                            #Added logging in the validationloop (after line 277)
+                            logger.debug(f"Passage {i} filtered: relevance {relevance} < min_relevance {min_relevance}")
                             continue
                             
                         # Clean and validate the extracted text
                         text = passage["text"].strip()
                         if len(text) < 10:  # Skip very short extractions
+                            #DEBUG: check for text length filtering
+                            logger.debug(f"Passage {i} filtered: text too short ({len(text)} chars < 10)")
                             continue
                             
                         valid_passages.append({

@@ -13,7 +13,7 @@ from agents.hotpotqa_document_loader import load_hotpotqa_context_as_documents
 from agents.extractor_agent import ExtractorAgent
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 async def test_extraction_with_low_threshold():
