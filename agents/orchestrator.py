@@ -313,7 +313,7 @@ class MARAGOrchestrator:
             for subquery in subqueries:
                 retrieval_input = {
                     "query": subquery["query"],
-                    "k": 5,  # Default retrieval count
+                    "k": getattr(self.retriever, 'top_k', 10),  # Use retriever's configured top_k,
                     "min_similarity": 0.3  # Lower similarity threshold
                 }
                 
@@ -335,7 +335,8 @@ class MARAGOrchestrator:
                 "query": step["description"],
                 "documents": all_retrieved_docs,
                 "history": history,
-                "min_relevance": 0.2  # Even lower relevance threshold
+                "min_relevance": 0.2,  # Even lower relevance threshold
+                "max_documents": min(len(all_retrieved_docs), 15)  # Process all retrieved docs, cap at 15
             }
             
             extractor_response = await self.extractor.process(extractor_input)

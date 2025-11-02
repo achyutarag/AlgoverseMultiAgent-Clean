@@ -162,6 +162,11 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
         try:
             # Limit number of documents to process
             documents = documents[:max_documents]
+            model_context = getattr(self.llm.config, 'context_length', 8192) if hasattr(self.llm, 'config') else 8192
+            system_overhead = 3000  # Conservative estimate for system prompt, metadata, instructions
+            available_tokens = max(1000, model_context - system_overhead)  # Ensure minimum
+            tokens_per_doc = available_tokens // max_documents if max_documents > 0 else available_tokens // 10
+            max_chars_per_doc = int(tokens_per_doc / 0.25)  # ~0.25 tokens per character
             
             # Prepare the enhanced prompt (preprocess for LLM)
             prompt = f"""{self.system_prompt}
@@ -193,9 +198,9 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
                 prompt += (
                     f"\n[Document {i+1}, ID: {doc_id}, Retrieval Score: {score:.3f}]\n"
                     f"Metadata: {metadata}\n"
-                    f"Content: {content[:2500]}"  # Increased content length
+                    f"Content: {content[:max_chars_per_doc]}"  # Use the calculated value"
                 )
-                if len(content) > 2500:
+                if len(content) > max_chars_per_doc:
                     prompt += "... [truncated]"
             
             # Add extraction instructions
