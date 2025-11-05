@@ -1,6 +1,6 @@
 Question,Prediction,Ground_Truth,ExactMatch,F1Score
-Were Scott Derrickson and Ed Wood of the same nationality?,ERROR,yes,0.0,0.0
-What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?,ERROR,Chief of Protocol,0.0,0.0
-"What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?",ERROR,Animorphs,0.0,0.0
-Are the Laleli Mosque and Esma Sultan Mansion located in the same neighborhood?,ERROR,no,0.0,0.0
-"The director of the romantic comedy ""Big Stone Gap"" is based in what New York city?",ERROR,"Greenwich Village, New York City",0.0,0.0
+Were Scott Derrickson and Ed Wood of the same nationality?,Both Scott Derrickson and Ed Wood were American,yes,0.0,0.0
+What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?,"Shirley Temple Black served as United States ambassador to Ghana, United States ambassador to Czechoslovakia, and Chief of Protocol of the United States",Chief of Protocol,0.0,0.24000000000000002
+"What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?","The Animorphs series meets all criteria, being a science fantasy young adult series narrated in the first person, and it has companion books, such as *The Hork-Bajir Chronicles*, that detail enslaved alien species and worlds",Animorphs,0.0,0.0625
+Are the Laleli Mosque and Esma Sultan Mansion located in the same neighborhood?,no,no,1.0,1.0
+"The director of the romantic comedy ""Big Stone Gap"" is based in what New York city?","Adriana Trigiani, the director of ""Big Stone Gap,"" is based in Greenwich Village, New York City","Greenwich Village, New York City",0.0,0.5

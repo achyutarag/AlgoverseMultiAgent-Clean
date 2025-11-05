@@ -25,7 +25,7 @@ async def test_extraction_with_low_threshold():
     try:
         # Load documents
         print("📚 Loading documents...")
-        docs = load_hotpotqa_context_as_documents("validation", num_examples=3)
+        docs = load_hotpotqa_context_as_documents("validation", num_examples=14)
         print(f"✅ Loaded {len(docs)} documents")
         
         # Initialize extractor
@@ -57,8 +57,8 @@ async def test_extraction_with_low_threshold():
             # Test extraction with very low threshold
             extraction_input = {
                 "query": test_query,
-                "documents": relevant_docs[:2],  # Use first 2 documents
-                "min_relevance": 0.1  # Very low threshold
+                "documents": relevant_docs[:14],  # Use first 4 documents
+                "min_relevance": 0.2  # Very low threshold
             }
             
             response = await extractor.process(extraction_input)

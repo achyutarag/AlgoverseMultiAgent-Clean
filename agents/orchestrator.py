@@ -309,12 +309,13 @@ class MARAGOrchestrator:
             # 2. Retrieval Tool (for each subquery)
             logger.debug(f"Step {step['id']}: Executing retrieval for {len(subqueries)} subqueries...")
             all_retrieved_docs = []
+            seen_doc_ids = set()  # Track seen document IDs for deduplication
             
             for subquery in subqueries:
                 retrieval_input = {
                     "query": subquery["query"],
-                    "k": getattr(self.retriever, 'top_k', 10),  # Use retriever's configured top_k,
-                    "min_similarity": 0.3  # Lower similarity threshold
+                    "k": getattr(self.retriever, 'top_k', 10),  # Use retriever's configured top_k
+                    "min_similarity": 0.3  # Lower similarity threshold for better recall
                 }
                 
                 retrieval_response = await self.retriever.process(retrieval_input)
@@ -322,24 +323,99 @@ class MARAGOrchestrator:
                     logger.warning(f"Retrieval failed for subquery: {subquery['query']}")
                     continue
                 
-                clean_retrieval = TokenizationUtils.strip_markdown_json(retrieval_response.content)
-                retrieved_docs = json.loads(clean_retrieval)
-                all_retrieved_docs.extend(retrieved_docs.get("documents", []))
+                # Use metadata first (more efficient, already a list)
+                docs_from_metadata = retrieval_response.metadata.get("documents", [])
+                
+                if docs_from_metadata:
+                    # Deduplicate by document ID and add to collection
+                    for doc in docs_from_metadata:
+                        doc_id = doc.get("id") or doc.get("metadata", {}).get("id")
+                        if doc_id and doc_id not in seen_doc_ids:
+                            seen_doc_ids.add(doc_id)
+                            all_retrieved_docs.append(doc)
+                        elif not doc_id:
+                            # If no ID, use content hash or add anyway
+                            all_retrieved_docs.append(doc)
+                else:
+                    # Fallback to JSON parsing if metadata not available
+                    try:
+                        clean_retrieval = TokenizationUtils.strip_markdown_json(retrieval_response.content)
+                        retrieved_docs = json.loads(clean_retrieval)
+                        docs_from_json = retrieved_docs.get("documents", [])
+                        for doc in docs_from_json:
+                            doc_id = doc.get("id") or doc.get("metadata", {}).get("id")
+                            if doc_id and doc_id not in seen_doc_ids:
+                                seen_doc_ids.add(doc_id)
+                                all_retrieved_docs.append(doc)
+                            elif not doc_id:
+                                all_retrieved_docs.append(doc)
+                    except (json.JSONDecodeError, Exception) as e:
+                        logger.warning(f"Failed to parse retriever response for subquery '{subquery['query']}': {e}")
+                        continue
             
             if not all_retrieved_docs:
                 raise Exception("No documents retrieved")
             
+            # Sort documents by relevance score (highest first) if scores available
+            all_retrieved_docs.sort(
+                key=lambda x: x.get("score", 0.0) if isinstance(x.get("score"), (int, float)) else 0.0,
+                reverse=True
+            )
+            
+            # Limit documents before passing to extractor (reduce load)
+            max_docs_for_extractor = min(len(all_retrieved_docs), 15)  # Cap at 15 documents
+            limited_docs = all_retrieved_docs[:max_docs_for_extractor]
+            
+            logger.info(f"Step {step['id']}: Collected {len(all_retrieved_docs)} unique documents, "
+                       f"limiting to {len(limited_docs)} for extractor")
+            
             # 3. Extractor Agent
-            logger.debug(f"Step {step['id']}: Executing extraction on {len(all_retrieved_docs)} documents...")
+            logger.debug(f"Step {step['id']}: Executing extraction on {len(limited_docs)} documents...")
+            
+            # Extract subquery texts for the extractor
+            subquery_texts = [sq["query"] for sq in subqueries]
+            
             extractor_input = {
-                "query": step["description"],
-                "documents": all_retrieved_docs,
+                "query": step["description"],  # Keep for context
+                "subqueries": subquery_texts,  # CRITICAL: Pass the actual subqueries used for retrieval
+                "documents": limited_docs,  # Use limited, sorted, deduplicated docs
                 "history": history,
-                "min_relevance": 0.2,  # Even lower relevance threshold
-                "max_documents": min(len(all_retrieved_docs), 15)  # Process all retrieved docs, cap at 15
+                "max_documents": max_docs_for_extractor,  # Pass the limit explicitly
+                "min_relevance": 0.2  # Lower threshold for extraction
             }
+
+            # DEBUG: Log extractor input details
+            logger.debug(f"[EXTRACTOR DEBUG] Step {step['id']}: Extractor Input Details:")
+            logger.debug(f"  - Query: {step['description'][:200]}...")  # Truncate if too long
+            logger.debug(f"  - Subqueries: {subquery_texts}")  # ADD THIS LINE to verify subqueries
+            logger.debug(f"  - Number of documents: {len(all_retrieved_docs)}")
+            logger.debug(f"  - Max documents to process: {extractor_input['max_documents']}")
+            logger.debug(f"  - Min relevance: {extractor_input['min_relevance']}")
+            logger.debug(f"  - History length: {len(history)}")
+            
+            # Show sample document structure (first 2-3 documents)
+            logger.debug(f"[EXTRACTOR DEBUG] Sample documents (first {min(3, len(all_retrieved_docs))}):")
+            for i, doc in enumerate(all_retrieved_docs[:3]):
+                doc_id = doc.get('id', 'NO_ID')
+                page_content_preview = doc.get('page_content', 'NO_CONTENT')[:200]  # First 200 chars
+                score = doc.get('score', 'NO_SCORE')
+                logger.debug(f"  Document {i+1}:")
+                logger.debug(f"    - ID: {doc_id}")
+                logger.debug(f"    - Score: {score}")
+                logger.debug(f"    - Content preview: {page_content_preview}...")
+                logger.debug(f"    - Content length: {len(doc.get('page_content', ''))}")
+                logger.debug(f"    - Metadata keys: {list(doc.get('metadata', {}).keys())}")
+            
+            # Check if documents have content
+            docs_with_content = sum(1 for doc in all_retrieved_docs if doc.get('page_content', '').strip())
+            docs_empty = len(all_retrieved_docs) - docs_with_content
+            logger.debug(f"[EXTRACTOR DEBUG] Document content status:")
+            logger.debug(f"  - Documents with content: {docs_with_content}")
+            logger.debug(f"  - Empty documents: {docs_empty}")
             
             extractor_response = await self.extractor.process(extractor_input)
+            
+            
             if extractor_response.metadata.get("error"):
                 raise Exception(f"Extractor failed: {extractor_response.metadata.get('error')}")
             

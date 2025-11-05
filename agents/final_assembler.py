@@ -351,27 +351,45 @@ class FinalAssembler:
         return synthesis
     
     async def _synthesize_simple_answer(self, query: str, step_answers: List[Dict[str, Any]]) -> str:
-        """Synthesize answer for simple questions."""
+        """Synthesize answer for simple questions - produce concise answers."""
         if not step_answers:
             return "No information found to answer your question."
         
-        # Use the highest confidence answer or combine if similar confidence
+        # Use the highest confidence answer
         best_answer = max(step_answers, key=lambda x: x["confidence"])
         
+        # For yes/no questions, extract just yes/no
+        query_lower = query.lower()
+        is_yes_no_question = any(keyword in query_lower for keyword in [
+            "yes or no", "is it", "are they", "do they", "does", "did", "was", "were",
+            "same", "different", "compare", "both", "either", "neither"
+        ])
+        
+        if is_yes_no_question:
+            # Extract yes/no (keep existing logic)
+            import re
+            answer_lower = best_answer["answer"].lower()
+            yes_no_match = re.search(r'\b(yes|no)\s*\.?\s*$', answer_lower)
+            if yes_no_match:
+                return yes_no_match.group(1).capitalize()
+            yes_no_match = re.search(r'\b(yes|no)\b', answer_lower)
+            if yes_no_match:
+                return yes_no_match.group(1).capitalize()
+        
+        # For single answer, return it directly
         if len(step_answers) == 1:
             return best_answer["answer"]
         
-        # Combine multiple answers
-        synthesis = best_answer["answer"]
+        # For multiple answers, use the LAST step answer (final conclusion)
+        final_step_answer = step_answers[-1]["answer"]
         
-        # Add additional information from other steps if confidence is similar
-        for step_answer in step_answers:
-            if (step_answer != best_answer and 
-                abs(step_answer["confidence"] - best_answer["confidence"]) < 0.2):
-                synthesis += f"\n\nAdditional information: {step_answer['answer']}"
+        # Minimal safety net: if still too long, use first sentence
+        if len(final_step_answer) > 200:
+            sentences = final_step_answer.split('.')
+            if sentences and len(sentences[0]) < 150:
+                return sentences[0].strip() + "."
         
-        return synthesis
-    
+        return final_step_answer
     async def _calculate_overall_confidence(self, processed_steps: List[Dict[str, Any]]) -> float:
         """
         Calculate overall confidence score.

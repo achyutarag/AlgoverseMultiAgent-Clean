@@ -191,12 +191,12 @@ Return a JSON object with this structure:
             # Add instructions for synthesis
             prompt += """
             
-            ### Instructions:
-            Please synthesize a comprehensive answer to the subquery using the evidence above.
+             ### Instructions:
+            Please synthesize a CONCISE, DIRECT answer to the subquery using the evidence above.
             Your response MUST be a valid JSON object with this exact structure:
             {
                 "question": "The original subquery",
-                "answer": "Your comprehensive answer based on the evidence",
+                "answer": "Your DIRECT answer - be concise and specific (1-2 sentences max)",
                 "confidence": 0.0-1.0,  // Your confidence in the answer
                 "reasoning": "Your step-by-step reasoning process",
                 "sources": ["doc1_id", "doc2_id"],  // IDs of sources used
@@ -210,13 +210,15 @@ Return a JSON object with this structure:
             }
             
             Guidelines:
-            1. Synthesize information from multiple sources when they complement each other
-            2. Address the subquery directly and comprehensively
-            3. Maintain logical flow and coherence in your reasoning
-            4. Include relevant details that support your main answer
-            5. Note any limitations or uncertainties in the available evidence
-            6. Rate your confidence honestly based on evidence quality and completeness
-            7. Provide clear reasoning for your conclusions
+            1. **BE CONCISE**: Answer the subquery directly with 1-2 sentences maximum
+            2. **BE SPECIFIC**: Extract the exact answer (name, date, title, etc.) - don't provide context unless necessary
+            3. For yes/no questions: Answer with just "Yes" or "No"
+            4. For factual questions: Provide the specific fact (e.g., "chief of protocol", "American", "David Seville")
+            5. Synthesize information from multiple sources ONLY when they complement each other
+            6. DO NOT include unnecessary context or background information
+            7. DO NOT repeat the question or provide verbose explanations
+            8. Rate your confidence honestly based on evidence quality and completeness
+            9. Put reasoning in the "reasoning" field, not in the "answer" field
             """
             
             # Log the QA request

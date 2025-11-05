@@ -55,7 +55,8 @@ class ExtractorAgent(BaseAgent):
 
 Guidelines for extraction:
 - Extract sentences or spans that answer the subquery (directly or indirectly)
-- ALWAYS populate the extracted_passages array - never return empty array
+- If documents are provided, extract at least 1 passage (even with low relevance) explaining why it's relevant or not relevant
+- Only return empty array if NO documents were provided
 - Preserve important context needed to understand the extracted information
 - Combine information from multiple sources when they complement each other
 - Assign relevance scores based on how directly the content addresses the subquery
@@ -139,9 +140,10 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
             AgentResponse containing the extracted passages and aggregated evidence
         """
         query = input_data.get('query', '').strip()
+        subqueries = input_data.get('subqueries', [])  # NEW: Get subqueries if provided
         documents = input_data.get('documents', [])
         history = input_data.get('history', [])
-        max_documents = min(int(input_data.get('max_documents', 8)), 15)  # Cap at 15 documents
+        max_documents = min(int(input_data.get('max_documents', 8)), 15)
         min_relevance = max(0.0, min(1.0, float(input_data.get('min_relevance', 0.3))))
         context_needed = input_data.get('context_needed', ['factual'])
         
@@ -168,15 +170,23 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
             available_tokens = max(1000, model_context - system_overhead)  # Ensure minimum
             tokens_per_doc = available_tokens // max_documents if max_documents > 0 else available_tokens // 10
             max_chars_per_doc = int(tokens_per_doc / 0.25)  # ~0.25 tokens per character
-            
-            # Prepare the enhanced prompt (preprocess for LLM)
+
+            # Build the extraction query - prioritize subqueries if available
+            if subqueries:
+                extraction_query = "\n".join([f"- {sq}" for sq in subqueries])
+                extraction_context = f"### Extract passages that answer these queries:\n{extraction_query}\n\n(Step context: {query})"
+            else:
+                extraction_query = query
+                extraction_context = "Subquery to Extract For:"
+
             prompt = f"""{self.system_prompt}
-            
-            ### Subquery to Extract For:
-            {tokenization_utils.preprocess_llm_input(query)}
-            
+
+            ### {extraction_context}
+            {extraction_query}
+
             ### Context Types Needed:
-            {', '.join(context_needed)}
+            {', '.join(context_needed)
+            }
             
             ### Retrieved Documents:
             """
@@ -207,19 +217,24 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
             # Add extraction instructions
             prompt += f"""
             
-            ### CRITICAL REQUIREMENTS (MUST FOLLOW - READ FIRST):  
-            - ⚠️ You MUST populate the "extracted_passages" array with at least 1-2 passages
-            - ⚠️ DO NOT return an empty "extracted_passages": [] - this will cause system failure
-            - ⚠️ Extract specific sentences or spans from the documents - use the EXACT text from documents above
-            - ⚠️ If you create aggregated_evidence, you MUST also extract at least 1-2 individual passages
-            - Extract ANY sentence that contains relevant information, even if indirectly related
-            - Use relevance scores of 0.3 or higher for any relevant information (minimum threshold: {min_relevance})
-            - Focus on context types: {', '.join(context_needed)}
+            ### CRITICAL REQUIREMENTS (MUST FOLLOW - READ FIRST):   
+            - ⚠️ Extract passages with relevance ≥ {min_relevance} (use this exact threshold, not 0.3)
+            - ⚠️ Extract passages that have ANY semantic connection to the query (even if weak, relevance 0.2-0.4)"
+            - ⚠️ If documents have NO semantic connection to the query, you may return empty array BUT must provide detailed extraction_reasoning explaining why no passages were relevant"
+            - ⚠️ Do NOT extract completely unrelated passages just to populate the array - quality over quantity
+            - ⚠️ If documents contain ANY information related to the subquery (even indirectly), you MUST extract at least 1-2 passages
+            - ⚠️ Being "somewhat relevant" (relevance 0.2-0.4) is acceptable - extract these passages!
+            - ⚠️ Extract specific sentences or spans that are relevant to the subquery (be inclusive, not restrictive)
+            - ⚠️ Use relevance scores based on actual relevance - scores ≥ {min_relevance} are acceptable
+            - ⚠️ Focus on context types: {', '.join(context_needed)}
 
             ### ❌ WRONG - DO NOT DO THIS:
             {{
-                "extracted_passages": []  // ❌ NEVER return empty array
+                "extracted_passages": [
+                    {{"text": "Irrelevant passage", "relevance": 0.1, "reasoning": "Just to fill array"}}  // ❌ DON'T do this
+                ]
             }}
+
 
             ### ✅ CORRECT - ALWAYS DO THIS:
             {{
@@ -228,27 +243,39 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
                         "text": "Exact sentence from document",
                         "document_id": "doc_1",
                         "chunk_id": "chunk_1",
-                        "relevance": 0.8,
-                        "reasoning": "This directly answers the query",
+                        "relevance": {min(min_relevance + 0.05, 0.35)},  // Score just above threshold (≥ {min_relevance}) - THIS IS VALID AND ACCEPTABLE
+                        "reasoning": "This helps answer the query",
                         "source_context": "From document context"
                     }}
                 ]
             }}
-        
+
+
+            ### ⚠️ IMPORTANT - When to use empty array:
+            - ALWAYS extract at least 1 passage when documents are provided
+            - If documents don't match the query, extract a passage explaining why (relevance 0.2-0.3)
+            - Being "somewhat relevant" (relevance 0.2-0.4) is STILL RELEVANT - extract it!
+            - Empty array is ONLY acceptable if NO documents were provided at all
+                    
             ### Instructions:
             Please perform fine-grained extraction focusing on:
             1. Extract sentences or spans that are relevant to the subquery (be inclusive, not restrictive)
             2. Include information that helps answer the subquery, even if indirectly
             3. Combine complementary information from multiple sources
-            4. Assign relevance scores generously - use the full range from 0.1 to 1.0
+            Assign relevance scores based on actual relevance:
+            - {min_relevance}-0.5: Somewhat relevant, indirectly related (ACCEPTABLE - extract these)
+            - 0.5-0.7: Relevant, helps answer the query
+            - 0.7-1.0: Highly relevant, directly answers the query
+            - Below {min_relevance}: Do NOT extract (not relevant enough)
             5. Provide reasoning for each extraction decision
             6. Create an aggregated summary of all relevant evidence
 
             ### FINAL REMINDER BEFORE RETURNING JSON:
-            1. Check that "extracted_passages" array has at least 1-2 items
-            2. If extracted_passages is empty, your response is INVALID
-            3. Extract exact text from the documents provided above
-            4. Do NOT summarize - extract specific passages
+            1. Extract at least 1-2 passages if any document has relevance ≥ {min_relevance}
+            2. If documents don't match the query, extract at least 1 passage explaining why (with low relevance 0.2-0.3)
+            3. NEVER return completely empty array - always extract at least 1 passage when documents are provided
+            4. Extract exact text from the documents provided above
+            5. Do NOT summarize - extract specific passages
             
             
             Return your response as a valid JSON object with the structure shown above.
@@ -256,7 +283,7 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
             
             # Log the extraction request
             logger.info(f"Performing fine-grained extraction for subquery: {query[:100]}...")
-            logger.debug(f"Processing {len(documents)} documents with min_relevance={min_relevance}")
+            #logger.debug(f"Processing {len(documents)} documents with min_relevance={min_relevance}")
             
             # Get the LLM response
             response = await self.generate_text(
@@ -270,31 +297,28 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
             #3) Whether the issue is in the LLM output or in processing
 
             # DEBUG: Log raw LLM response BEFORE any processing
-            logger.debug("=" * 80)
-            logger.debug("RAW LLM RESPONSE (BEFORE POSTPROCESSING):")
-            logger.debug("=" * 80)
-            logger.debug(f"Response type: {type(response)}")
-            logger.debug(f"Response length: {len(str(response))} characters")
-            logger.debug(f"Full response:\n{response}")
-            logger.debug("=" * 80)
+            # logger.debug("=" * 80)
+            # logger.debug("RAW LLM RESPONSE (BEFORE POSTPROCESSING):")
+            # logger.debug("=" * 80)
+            # logger.debug(f"Response type: {type(response)}")
+            # logger.debug(f"Response length: {len(str(response))} characters")
+            # logger.debug(f"Full response:\n{response}")
+            # logger.debug("=" * 80)
 
             # Postprocess the LLM response
             response = tokenization_utils.postprocess_answer(response, output_type="json")
 
             # DEBUG: Log response AFTER postprocessing
-            logger.debug("=" * 80)
-            logger.debug("LLM RESPONSE AFTER POSTPROCESSING:")
-            logger.debug("=" * 80)
-            logger.debug(f"Response after postprocess:\n{response}")
-            logger.debug("=" * 80)
+            # logger.debug("=" * 80)
+            # logger.debug("LLM RESPONSE AFTER POSTPROCESSING:")
+            # logger.debug("=" * 80)
+            # logger.debug(f"Response after postprocess:\n{response}")
+            # logger.debug("=" * 80)
 
             #DEBUG: check for response length and preview
 
-            logger.debug(f"LLM response length: {len(response)} characters")
-            logger.debug(f"LLM response preview: {response[:200]}...")
-            
-            # Postprocess the LLM response
-            response = tokenization_utils.postprocess_answer(response, output_type="json")
+            # logger.debug(f"LLM response length: {len(response)} characters")
+            # logger.debug(f"LLM response preview: {response[:200]}...")
             
             try:
                 # Extract JSON from the response
