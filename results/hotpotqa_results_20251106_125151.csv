@@ -1,0 +1,14 @@
+Question,Prediction,Ground_Truth,ExactMatch,F1Score,Latency(s),Tokens
+Were Scott Derrickson and Ed Wood of the same nationality?,American,yes,0.0,0.0,637.85,1507
+What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?,United States ambassador to Ghana,Chief of Protocol,0.0,0.0,97.13,1516
+"What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?",Animorphs,Animorphs,1.0,1.0,128.15,1518
+Are the Laleli Mosque and Esma Sultan Mansion located in the same neighborhood?,no,no,1.0,1.0,46.72,1509
+"The director of the romantic comedy ""Big Stone Gap"" is based in what New York city?","Greenwich Village, New York City","Greenwich Village, New York City",1.0,1.0,50.86,1515
+
+Summary,,,,,,
+Exact Match,,,0.6000,,,
+F1 Score,,,0.6000,,,
+Latency/Q (s),,,192.14,,,
+Total Latency (s),,,960.71,,,
+Tokens/Q,,,1513,,,
+Examples,,,5,,,

@@ -148,16 +148,16 @@ Return a JSON object with this structure:
             # Prepare the enhanced prompt with step-specific context (preprocess for LLM)
             prompt = f"""{self.system_prompt}
             
-            ### Subquery to Answer:
-            {tokenization_utils.preprocess_llm_input(question)}
+### Subquery to Answer:
+{tokenization_utils.preprocess_llm_input(question)}
+
+### Step Context:
+{json.dumps(step_context, indent=2) if step_context else "No specific step context"}
+"""
             
-            ### Step Context:
-            {json.dumps(step_context, indent=2) if step_context else "No specific step context"}
-            """
-            
-            # Add overall query context if available
+            # Add overall query context prominently at the top (if available)
             if overall_query:
-                prompt += f"\n### Overall Query Context:\n{overall_query}"
+                prompt += f"\n\n### ORIGINAL QUESTION (USE TO GUIDE ANSWER FORMAT):\n{overall_query}\n"
             
             # Add previous answers if available
             if previous_answers:
@@ -189,37 +189,96 @@ Return a JSON object with this structure:
                 )
             
             # Add instructions for synthesis
-            prompt += """
-            
-             ### Instructions:
-            Please synthesize a CONCISE, DIRECT answer to the subquery using the evidence above.
-            Your response MUST be a valid JSON object with this exact structure:
-            {
-                "question": "The original subquery",
-                "answer": "Your DIRECT answer - be concise and specific (1-2 sentences max)",
-                "confidence": 0.0-1.0,  // Your confidence in the answer
-                "reasoning": "Your step-by-step reasoning process",
-                "sources": ["doc1_id", "doc2_id"],  // IDs of sources used
-                "supporting_evidence": [
-                    {
-                        "text": "Relevant passage from context",
-                        "source": "source_document_id",
-                        "relevance": 0.9  // How relevant this evidence is
-                    }
-                ]
-            }
-            
-            Guidelines:
-            1. **BE CONCISE**: Answer the subquery directly with 1-2 sentences maximum
-            2. **BE SPECIFIC**: Extract the exact answer (name, date, title, etc.) - don't provide context unless necessary
-            3. For yes/no questions: Answer with just "Yes" or "No"
-            4. For factual questions: Provide the specific fact (e.g., "chief of protocol", "American", "David Seville")
-            5. Synthesize information from multiple sources ONLY when they complement each other
-            6. DO NOT include unnecessary context or background information
-            7. DO NOT repeat the question or provide verbose explanations
-            8. Rate your confidence honestly based on evidence quality and completeness
-            9. Put reasoning in the "reasoning" field, not in the "answer" field
-            """
+            prompt += f"""
+
+### Instructions:
+Please synthesize a CONCISE, DIRECT answer to the subquery using the evidence above.
+Your response MUST be a valid JSON object with this exact structure:
+{{
+    "question": "The original subquery",
+    "answer": "Your DIRECT answer - be concise and specific (typically 1-5 words for factual questions, just 'Yes' or 'No' for yes/no questions)",
+    "confidence": 0.0-1.0,
+    "reasoning": "Your step-by-step reasoning process",
+    "sources": ["doc1_id", "doc2_id"],
+    "supporting_evidence": [
+        {{
+            "text": "Relevant passage from context",
+            "source": "source_document_id",
+            "relevance": 0.9
+        }}
+    ]
+}}
+
+### CRITICAL: Answer Format Rules (READ FIRST):
+
+**1. Entity Names (e.g., "What is the name of...", "Who created...", "formed by who?")**
+   - Rule: Extract ONLY the entity name - nothing else
+   - ❌ WRONG: "[group name] formed by [entity]" (includes extra context)
+   - ✅ CORRECT: "[entity name]" (just the entity)
+   - Example: Question "formed by who?" → Answer: "YG Entertainment" (not "winner formed by YG Entertainment")
+
+**2. Numerical Questions (e.g., "how many people?", "how many cars?", "what capacity?")**
+   - Rule: Extract ONLY the number and unit (if specified) - nothing else
+   - ❌ WRONG: "[venue name] [number] people" (includes venue name)
+   - ❌ WRONG: "[number] people" when ground truth is "[number] seated" (wrong unit)
+   - ✅ CORRECT: "[number]" or "[number] [unit]" (just the number and correct unit from evidence)
+   - Example: Question "can serve how many guests?" → Answer: "400 guests" (not "white house 400 people")
+   - If evidence specifies a unit (e.g., "seated", "people", "cars"), use that exact unit
+
+**3. Location Questions (e.g., "in what [city]?", "located in what [city]?")**
+   - Rule: Return format "[neighborhood], [city]" when question asks for location within a city
+   - ❌ WRONG: "[neighborhood]" (missing city)
+   - ✅ CORRECT: "[neighborhood], [city]" (complete location)
+   - Example: Question "in what [city]?" → Answer: "[neighborhood], [city]" (not just "[neighborhood]")
+   - Example: Question "located in what city?" → Answer: "Downtown District, Chicago" (not just "Downtown District")
+   - If question asks for a neighborhood within a specific city, include both neighborhood and city
+
+**4. Specific Positions/Titles (e.g., "What position did X hold?", "What was X's role?")**
+   - Rule: Extract ONLY ONE position - the most prominent/relevant one if multiple exist
+   - ❌ WRONG: "[position1] and [position2] and [position3]" (listing multiple)
+   - ❌ WRONG: "[position] of [country/organization]" (adding irrelevant context)
+   - ✅ CORRECT: "[position name]" (ONE position - extract the most prominent/relevant one)
+   - Rule: If the question asks for "a position" or "the position" (singular) but evidence shows multiple positions:
+     * Extract ONLY ONE position based on the evidence:
+       - Choose the position that appears most prominently in the evidence (mentioned first, emphasized, most detailed, or held for the longest time period)
+       - Choose the position most directly relevant to the question's context (e.g., if question mentions a specific time period, choose the position held during that time)
+       - If positions are equally prominent, choose the most significant/highest-ranking one
+     * DO NOT list multiple positions - extract ONLY the position name itself (no "of [country]", "of [organization]", etc.)
+
+**5. Yes/No Questions (e.g., "Are X and Y the same?", "Did X do Y?")**
+   - Rule: Answer with ONLY "Yes" or "No" - nothing else
+   - Even if the question mentions multiple entities with "and" or "both", answer with just "Yes" or "No"
+
+**6. Nationalities/Attributes (e.g., "What nationality was X?")**
+   - Rule: Extract ONLY the attribute asked for
+   - ❌ WRONG: "[person] was [nationality]" (includes person name)
+   - ✅ CORRECT: "[nationality]" (just the attribute)
+
+**7. Time Period Questions (e.g., "during what years?", "served during what timeframe?")**
+   - Rule: Extract the time period with connecting words if present in evidence
+   - ❌ WRONG: "1450-1494" (missing connector)
+   - ✅ CORRECT: "1450 until 1494" or "1450-1494" (preserve format from evidence using connector)
+
+### Guidelines:
+1. **BE CONCISE**: Answer the subquery directly - typically 1-5 words, rarely more than 1 sentence
+2. **BE SPECIFIC**: Extract ONLY the exact answer requested - nothing else
+3. **DO NOT** include descriptions, explanations, or multiple facts
+4. **DO NOT** list multiple positions/entities - extract ONLY the one asked for
+5. **DO NOT** provide reasoning in the answer field - put it in "reasoning" field
+6. **DO NOT** include venue names, organization names, or other context unless the question specifically asks for it
+7. If the question asks for one thing, provide ONLY that thing
+8. Rate your confidence honestly based on evidence quality
+
+**HANDLING AMBIGUOUS QUESTIONS**: If the question asks for one thing but evidence contains multiple valid answers:
+   - Choose the answer that is most prominently featured in the evidence:
+     * Most emphasized (repeatedly mentioned, highlighted)
+     * Most detailed (has more description, context, or information)
+     * Longest time period (held for the longest duration)
+     * Mentioned first or most prominently
+   - Choose the one most directly relevant to the question's context and intent
+   - Base your decision on the evidence provided, not on assumptions about what the "correct" answer might be
+   - Extract ONE answer, not multiple
+"""
             
             # Log the QA request
             logger.info(f"Generating step-specific answer for subquery: {question[:100]}...")

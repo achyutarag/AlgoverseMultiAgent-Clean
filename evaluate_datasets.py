@@ -4,6 +4,9 @@ import json
 import logging
 import re
 import string
+import time
+import os 
+from datetime import datetime
 from datasets import load_dataset
 from typing import Dict, Any, List
 from agents.hotpotqa_document_loader import load_hotpotqa_context_as_documents
@@ -55,6 +58,8 @@ async def evaluate_dataset(dataset_name: str, dataset_name_full: str, dataset_co
     results = []
     total_em = 0.0
     total_f1 = 0.0
+    total_latency = 0.0 #Added this
+    total_tokens = 0 #Added this
     
     print(f"Processing {len(eval_dataset)} examples...")
     
@@ -95,9 +100,10 @@ async def evaluate_dataset(dataset_name: str, dataset_name_full: str, dataset_co
             
             # Run through MA-RAG pipeline with documents
             print("Running through MA-RAG pipeline...")
+            start_time = time.time()  # Add this
             result = await run_optimized_marag_pipeline(question, documents=documents)
+            latency = time.time() - start_time  # Add this
             
-            # Extract final answer from pipeline result
             # Extract final answer from pipeline result
             # PipelineResult has 'final_answer' field, not 'content'
             if hasattr(result, 'final_answer'):
@@ -110,6 +116,15 @@ async def evaluate_dataset(dataset_name: str, dataset_name_full: str, dataset_co
                     prediction = result.content
             else:
                 prediction = str(result)
+            
+            # Estimate token usage (approximate) - MOVED HERE, after prediction is extracted
+            # Rough estimate: ~0.75 tokens per word for English text
+            prediction_tokens = int(len(prediction.split()) * 0.75)
+            # Estimate input tokens based on question + documents length
+            question_tokens = int(len(question.split()) * 0.75)
+            # Rough estimate: each document adds ~100-200 tokens on average
+            estimated_doc_tokens = len(documents) * 150 if documents else 0
+            total_tokens_estimate = prediction_tokens + question_tokens + estimated_doc_tokens
             
             # Post-process prediction for evaluation: extract concise answer
             # For yes/no questions, extract just "yes" or "no" from verbose answers
@@ -184,22 +199,24 @@ async def evaluate_dataset(dataset_name: str, dataset_name_full: str, dataset_co
             print(f"[DEBUG] Prediction type: {type(prediction)}")
             print(f"[DEBUG] Prediction is None/empty: {prediction is None or prediction == ''}")
 
-
-
             
             # Calculate metrics
             em_score = exact_match_score(prediction, ground_truth)
             f1 = f1_score(prediction, ground_truth)
-            
+
             total_em += em_score
             total_f1 += f1
+            total_latency += latency  # Add this
+            total_tokens += total_tokens_estimate  # Add this
             
             results.append({
                 "question": question,
                 "prediction": prediction,
                 "ground_truth": ground_truth,
                 "exact_match": em_score,
-                "f1_score": f1
+                "f1_score": f1,
+                "latency": latency,  # Add this
+                "tokens": total_tokens_estimate  # Add this
             })
             
             print(f"Exact Match: {em_score:.3f}, F1: {f1:.3f}")
@@ -211,25 +228,39 @@ async def evaluate_dataset(dataset_name: str, dataset_name_full: str, dataset_co
                 "prediction": "ERROR",
                 "ground_truth": ground_truth,
                 "exact_match": 0.0,
-                "f1_score": 0.0
+                "f1_score": 0.0,
+                "latency": 0.0,  # Add this
+                "tokens": 0  # Add this
             })
     
     # Calculate overall metrics
     avg_em = total_em / len(results)
     avg_f1 = total_f1 / len(results)
+    avg_latency = total_latency / len(results)  # Add this
+    avg_tokens = total_tokens / len(results)  # Add this
     
     print(f"\n{'='*60}")
     print(f"{dataset_name} Results:")
     print(f"Exact Match: {avg_em:.4f}")
     print(f"F1 Score:    {avg_f1:.4f}")
+    print(f"Latency/Q:   {avg_latency:.2f}s")  # Add this
+    print(f"Total Latency: {total_latency:.2f}s")  # Add this
+    print(f"Tokens/Q:    {avg_tokens:.0f}")  # Add this
     print(f"Examples:    {len(results)}")
     print(f"{'='*60}")
     
-    # Save results to CSV
-    csv_filename = f"{dataset_name.lower()}_results.csv"
+# Create results directory
+    results_dir = os.path.join(os.path.dirname(__file__), "results")
+    os.makedirs(results_dir, exist_ok=True)
+    
+    # Timestamped filename
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    csv_filename = os.path.join(results_dir, f"{dataset_name.lower()}_results_{timestamp}.csv")
+    
+    # Write CSV
     with open(csv_filename, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["Question", "Prediction", "Ground_Truth", "ExactMatch", "F1Score"])
+        writer.writerow(["Question", "Prediction", "Ground_Truth", "ExactMatch", "F1Score", "Latency(s)", "Tokens"])
         
         for result in results:
             writer.writerow([
@@ -237,12 +268,30 @@ async def evaluate_dataset(dataset_name: str, dataset_name_full: str, dataset_co
                 result["prediction"],
                 result["ground_truth"],
                 result["exact_match"],
-                result["f1_score"]
+                result["f1_score"],
+                f"{result['latency']:.2f}",
+                result["tokens"]
             ])
+        
+        # Add summary metrics
+        writer.writerow([])  # Empty row for spacing
+        writer.writerow(["Summary", "", "", "", "", "", ""])
+        writer.writerow(["Exact Match", "", "", f"{avg_em:.4f}", "", "", ""])
+        writer.writerow(["F1 Score", "", "", f"{avg_f1:.4f}", "", "", ""])
+        writer.writerow(["Latency/Q (s)", "", "", f"{avg_latency:.2f}", "", "", ""])
+        writer.writerow(["Total Latency (s)", "", "", f"{total_latency:.2f}", "", "", ""])
+        writer.writerow(["Tokens/Q", "", "", f"{avg_tokens:.0f}", "", "", ""])
+        writer.writerow(["Examples", "", "", f"{len(results)}", "", "", ""])
     
-    print(f"Results saved to {csv_filename}")
+    # Create/update experiments index file
+    index_file = os.path.join(results_dir, "experiments_index.txt")
+    with open(index_file, "a", encoding="utf-8") as f:
+        f.write(f"{timestamp} - {dataset_name} - {len(results)} examples - EM: {avg_em:.4f}, F1: {avg_f1:.4f}\n")
     
-    return results, avg_em, avg_f1
+    print(f"Results saved to {os.path.abspath(csv_filename)}")
+    print(f"Experiment logged in {os.path.abspath(index_file)}")
+    
+    return results, avg_em, avg_f1, avg_latency, total_latency, avg_tokens
 
 async def main():
     """Run evaluation on both datasets."""
@@ -254,14 +303,14 @@ async def main():
     #     "TriviaQA", 
     #     "mandarjoshi/trivia_qa", 
     #     "rc",  # Add this configuration
-    #     num_examples=5
+    #     num_examples=2
     # )
 
     # Evaluate HotpotQA
-    hotpot_results, hotpot_em, hotpot_f1 = await evaluate_dataset(
+    hotpot_results, hotpot_em, hotpot_f1, hotpot_avg_latency, hotpot_total_latency, hotpot_avg_tokens = await evaluate_dataset(
         "HotpotQA", 
         "hotpot_qa", 
-        "distractor",  # Add this configuration
+        "distractor",
         num_examples=5
     )
     
@@ -269,7 +318,7 @@ async def main():
     print(f"\n{'='*60}")
     print("EVALUATION SUMMARY")
     print(f"{'='*60}")
-    print(f"TriviaQA - EM: {trivia_em:.4f}, F1: {trivia_f1:.4f}")
+    #print(f"TriviaQA - EM: {trivia_em:.4f}, F1: {trivia_f1:.4f}")
     print(f"HotpotQA - EM: {hotpot_em:.4f}, F1: {hotpot_f1:.4f}")
     print(f"{'='*60}")
 
