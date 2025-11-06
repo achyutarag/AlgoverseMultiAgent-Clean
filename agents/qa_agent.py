@@ -215,7 +215,7 @@ Your response MUST be a valid JSON object with this exact structure:
    - Rule: Extract ONLY the entity name - nothing else
    - ❌ WRONG: "[group name] formed by [entity]" (includes extra context)
    - ✅ CORRECT: "[entity name]" (just the entity)
-   - Example: Question "formed by who?" → Answer: "YG Entertainment" (not "winner formed by YG Entertainment")
+   - Example: Question "formed by who?" → Answer: "Martin Luther King Junior" (not "Montgomery Improvement Association formed by Martin Luther King Junior")
 
 **2. Numerical Questions (e.g., "how many people?", "how many cars?", "what capacity?")**
    - Rule: Extract ONLY the number and unit (if specified) - nothing else
@@ -234,16 +234,19 @@ Your response MUST be a valid JSON object with this exact structure:
    - If question asks for a neighborhood within a specific city, include both neighborhood and city
 
 **4. Specific Positions/Titles (e.g., "What position did X hold?", "What was X's role?")**
-   - Rule: Extract ONLY ONE position - the most prominent/relevant one if multiple exist
+   - Rule: Extract ONLY ONE position - the most significant/relevant one if multiple exist
    - ❌ WRONG: "[position1] and [position2] and [position3]" (listing multiple)
    - ❌ WRONG: "[position] of [country/organization]" (adding irrelevant context)
-   - ✅ CORRECT: "[position name]" (ONE position - extract the most prominent/relevant one)
+   - ✅ CORRECT: "[position name]" (ONE position - extract the most significant/relevant one)
    - Rule: If the question asks for "a position" or "the position" (singular) but evidence shows multiple positions:
-     * Extract ONLY ONE position based on the evidence:
-       - Choose the position that appears most prominently in the evidence (mentioned first, emphasized, most detailed, or held for the longest time period)
-       - Choose the position most directly relevant to the question's context (e.g., if question mentions a specific time period, choose the position held during that time)
-       - If positions are equally prominent, choose the most significant/highest-ranking one
+     * Extract ONLY ONE position based on the evidence, prioritizing in this order:
+       1. **Historical significance** (first person to hold it, barrier-breaking, notable achievement)
+       2. **Most emphasized in evidence** (repeatedly mentioned, highlighted, most detailed description)
+       3. **Most directly relevant to question context** (if question mentions specific time period, event, or achievement, choose the position related to that)
+       4. **Highest-ranking or most prominent** (if positions are equally emphasized, choose the most senior/significant role)
+     * DO NOT prioritize based solely on duration - significance and emphasis matter more
      * DO NOT list multiple positions - extract ONLY the position name itself (no "of [country]", "of [organization]", etc.)
+   - Example: If evidence shows a person being the first person to achieve something for a certain time period, region, gender, or that isn't normal, choose that OVER ONES that are not a significant achievement. 
 
 **5. Yes/No Questions (e.g., "Are X and Y the same?", "Did X do Y?")**
    - Rule: Answer with ONLY "Yes" or "No" - nothing else
@@ -270,11 +273,13 @@ Your response MUST be a valid JSON object with this exact structure:
 8. Rate your confidence honestly based on evidence quality
 
 **HANDLING AMBIGUOUS QUESTIONS**: If the question asks for one thing but evidence contains multiple valid answers:
-   - Choose the answer that is most prominently featured in the evidence:
-     * Most emphasized (repeatedly mentioned, highlighted)
-     * Most detailed (has more description, context, or information)
-     * Longest time period (held for the longest duration)
-     * Mentioned first or most prominently
+   - Choose the answer that is most prominently featured in the evidence, prioritizing in this order:
+     * **Historical significance** (first, notable, barrier-breaking, landmark achievement)
+     * **Most emphasized** (repeatedly mentioned, highlighted, most detailed description)
+     * **Most directly relevant** (directly answers the question's specific context or intent)
+     * **Most detailed** (has more description, context, or information in the evidence)
+     * **Mentioned first or most prominently** (appears early or is emphasized in the evidence)
+   - DO NOT prioritize based solely on duration or time period unless the question specifically asks about duration
    - Choose the one most directly relevant to the question's context and intent
    - Base your decision on the evidence provided, not on assumptions about what the "correct" answer might be
    - Extract ONE answer, not multiple
