@@ -4,7 +4,7 @@
 # MA-RAG: Multi-Agent Retrieval-Augmented Generation Pipeline
 
 
-## 🚀 Features
+## Features
 
 - **Multi-Agent Architecture**: Planner, QA, Extractor, Step Definer, Retriever, and Final Assembler
 - **Google Gemini Integration**: Powered by `gemini-2.5-pro-preview-03-25`
@@ -12,13 +12,13 @@
 - **Evaluation Framework**: Built-in support for TriviaQA and HotpotQA datasets
 - **Mixed Model Support**: Optimized orchestrator for different model types
 
-## 📋 Prerequisites
+## Prerequisites
 
 - Python 3.8+
 - Google Cloud Account with Gemini API access
 - Service Account Key (JSON file)
 
-## 🛠️ Installation
+## Installation
 
 ### 1. Clone the Repository
 ```bash
@@ -49,7 +49,7 @@ export GOOGLE_APPLICATION_CREDENTIALS="/path/to/your/service-account-key.json"
 python test_gemini_debug.py
 ```
 
-## 🎯 Usage
+## Usage
 
 ### Basic Pipeline Execution
 ```python
@@ -84,7 +84,7 @@ python -m agents.test_planner_debug
 python -m agents.test_hotpotqa
 ```
 
-## 🏗️ Architecture
+## Architecture
 
 ### Agent Components
 - **Planner Agent**: Breaks down complex queries into sub-tasks
@@ -101,7 +101,7 @@ python -m agents.test_hotpotqa
 - `agents/llm_wrapper.py`: LLM abstraction layer
 - `agents/tokenization_utils.py`: JSON parsing utilities
 
-## 🔧 Configuration
+## Configuration
 
 ### Model Configuration
 Update model names in `pipeline.py`:
@@ -121,7 +121,7 @@ GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account-key.json"
 GEMINI_API_KEY="your-api-key"  # Alternative to service account
 ```
 
-## 📊 Evaluation
+## Evaluation
 
 The pipeline includes comprehensive evaluation on:
 - **TriviaQA**: Factual question answering
@@ -154,30 +154,24 @@ Results are saved to CSV files with metrics:
 - Adjust batch sizes for your hardware
 - Monitor API usage in Google Cloud Console
 
-## 📈 Results
+## Results
 
 The pipeline achieves strong performance on:
 - **TriviaQA**: High accuracy on factual questions
 - **HotpotQA**: Effective multi-hop reasoning
 
-## 🤝 Contributing
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Submit a pull request
-
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - Google Gemini API for LLM capabilities
 - Hugging Face datasets for evaluation
 - The open-source community for inspiration
 
-## 📞 Support
+## Support
 
 For issues and questions:
 - Create an issue on GitHub
@@ -186,4 +180,4 @@ For issues and questions:
 
 ---
 
-**Happy coding!** 🚀
+**Happy coding!** 
