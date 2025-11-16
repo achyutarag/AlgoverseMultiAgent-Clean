@@ -328,8 +328,8 @@ retriever = RetrieverAgent(
 ## Evaluation
 
 The pipeline includes comprehensive evaluation on:
-- **TriviaQA**: Factual question answering
 - **HotpotQA**: Multi-hop reasoning
+- **2WikiMultiHop**: Multi-hop reasoning
 
 Results are saved to CSV files with metrics:
 - **Exact Match (EM) Score**: Binary match between prediction and ground truth
