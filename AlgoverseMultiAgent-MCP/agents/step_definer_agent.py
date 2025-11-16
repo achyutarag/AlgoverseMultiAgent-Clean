@@ -176,13 +176,19 @@ Return a JSON object with basic info:
 
 Return ONLY the JSON."""
             
-            basic_response = await self.generate_text(
+            # Generate basic step info with token tracking
+            basic_response_text, basic_token_usage = await self.generate_text_with_usage(
                 basic_prompt,
                 temperature=0.3,
                 max_new_tokens=512
             )
+            total_token_usage = {
+                "prompt_tokens": basic_token_usage.get("prompt_tokens", 0),
+                "generated_tokens": basic_token_usage.get("generated_tokens", 0),
+                "total_tokens": basic_token_usage.get("total_tokens", 0)
+            }
             
-            basic_response = tokenization_utils.postprocess_answer(basic_response, output_type="json")
+            basic_response = tokenization_utils.postprocess_answer(basic_response_text, output_type="json")
             
             try:
                 clean_basic = TokenizationUtils.repair_json(basic_response)
@@ -225,13 +231,17 @@ Generate sub-query {sq_num} to help accomplish this step. Return a JSON object:
 
 Return ONLY the JSON object, no other text."""
                 
-                sq_response = await self.generate_text(
+                sq_response_text, sq_token_usage = await self.generate_text_with_usage(
                     sq_prompt,
                     temperature=0.3,
                     max_new_tokens=512
                 )
+                # Aggregate token usage
+                total_token_usage["prompt_tokens"] += sq_token_usage.get("prompt_tokens", 0)
+                total_token_usage["generated_tokens"] += sq_token_usage.get("generated_tokens", 0)
+                total_token_usage["total_tokens"] += sq_token_usage.get("total_tokens", 0)
                 
-                sq_response = tokenization_utils.postprocess_answer(sq_response, output_type="json")
+                sq_response = tokenization_utils.postprocess_answer(sq_response_text, output_type="json")
                 
                 try:
                     # Clean and repair JSON
@@ -297,6 +307,7 @@ Return ONLY the JSON object, no other text."""
                 metadata={
                     "step_id": result["step_id"],
                     "step_description": result["step_description"],
+                    "token_usage": total_token_usage,
                     "reasoning": result["reasoning"],
                     "context_analysis": result["context_analysis"],
                     "sub_queries": [sq.dict() for sq in parsed_sub_queries],

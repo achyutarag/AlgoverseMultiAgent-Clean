@@ -17,6 +17,7 @@ from .tokenization_utils import TokenizationUtils
 from .tokenization_utils import tokenization_utils
 from .mcp_reasoning_state import mcp_state_manager
 from .metadata_vector import metadata_vector_generator
+from .mcp_reasoning_state import MCPReasoningStateManager
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class PipelineResult(BaseModel):
     reasoning_trajectory: List[Dict[str, Any]] = Field(..., description="Step-by-step reasoning")
     sources: List[str] = Field(..., description="All source documents used")
     metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
+    token_usage: Dict[str, int] = Field(default_factory=lambda: {"prompt_tokens": 0, "generated_tokens": 0, "total_tokens": 0}, description="Total token usage across all agents")
 
 class MARAGOrchestrator:
     """
@@ -49,7 +51,7 @@ class MARAGOrchestrator:
         qa_agent: Optional[QAAgent] = None,
         state_manager: Optional[StateManager] = None,
         final_assembler: Optional[FinalAssembler] = None,
-        mcp_state_manager: Optional[MCPReasoningStateManager] = None
+        mcp_state_manager: Optional[MCPReasoningStateManager] = None,
         max_concurrent_steps: int = 1,
         timeout_seconds: int = 300
     ):
@@ -85,8 +87,23 @@ class MARAGOrchestrator:
         # Execution tracking
         self.current_execution_id: Optional[str] = None
         self.start_time: Optional[datetime] = None
+        self.token_usage: Dict[str, int] = {"prompt_tokens": 0, "generated_tokens": 0, "total_tokens": 0}
         
         logger.info("MA-RAG Orchestrator initialized with all components")
+    
+    def _extract_and_aggregate_token_usage(self, agent_response: Any) -> None:
+        """
+        Extract token usage from agent response and aggregate it.
+        
+        Args:
+            agent_response: AgentResponse object that may contain token usage in metadata
+        """
+        if hasattr(agent_response, 'metadata') and agent_response.metadata:
+            token_usage = agent_response.metadata.get("token_usage", {})
+            if token_usage:
+                self.token_usage["prompt_tokens"] += token_usage.get("prompt_tokens", 0)
+                self.token_usage["generated_tokens"] += token_usage.get("generated_tokens", 0)
+                self.token_usage["total_tokens"] += token_usage.get("total_tokens", 0)
     
     async def execute_pipeline(self, query: str, context: Optional[Dict[str, Any]] = None) -> PipelineResult:
         """
@@ -102,6 +119,8 @@ class MARAGOrchestrator:
         # Initialize execution tracking
         self.current_execution_id = f"exec_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.start_time = datetime.now()
+        # Reset token usage for this execution
+        self.token_usage = {"prompt_tokens": 0, "generated_tokens": 0, "total_tokens": 0}
 
         
         logger.info(f"Starting MA-RAG pipeline execution: {self.current_execution_id}")
@@ -109,7 +128,7 @@ class MARAGOrchestrator:
 
         
         # Normalize question for consistent processing
-        question = tokenization_utils.normalize_query(question)
+        question = tokenization_utils.normalize_query(query)
         
         try:
             # Step 1: Initialize state
@@ -158,6 +177,7 @@ class MARAGOrchestrator:
                 confidence=final_result.get("confidence", 0.0),
                 reasoning_trajectory=step_results,
                 sources=final_result.get("sources", []),
+                token_usage=self.token_usage.copy(),
                 metadata={
                     "execution_id": self.current_execution_id,
                     "plan": plan_result,
@@ -204,6 +224,7 @@ class MARAGOrchestrator:
             }
             
             planner_response = await self.planner.process(planner_input)
+            self._extract_and_aggregate_token_usage(planner_response)
             
             if planner_response.metadata.get("error"):
                 raise Exception(f"Planner error: {planner_response.metadata.get('error')}")
@@ -336,6 +357,7 @@ class MARAGOrchestrator:
             }
             
             step_definer_response = await self.step_definer.process(step_definer_input)
+            self._extract_and_aggregate_token_usage(step_definer_response)
             if step_definer_response.metadata.get("error"):
                 raise Exception(f"Step definer failed: {step_definer_response.metadata.get('error')}")
             
@@ -360,18 +382,20 @@ class MARAGOrchestrator:
             
             for subquery in subqueries:
 
-                # Get retrieval filters from metadata vector
-                retrieval_filters = metadata_vector.get_retrieval_filters()
+                
+                # Don't use metadata filters as FAISS filters (documents don't have these fields)
+                # Metadata filtering happens AFTER retrieval in retriever_agent
                 
                 retrieval_input = {
                     "query": subquery["query"],
-                    "k": getattr(self.retriever, 'top_k', 10),  # Use retriever's configured top_k
-                    "min_similarity": 0.3,  # Lower similarity threshold for better recall
-                    "metadata_vector": metadata_vector.to_dict(),  # ADD THIS
-                    "filter": retrieval_filters  # ADD THIS - use vector's filters
+                    "k": getattr(self.retriever, 'top_k', 10),
+                    "min_similarity": 0.3,
+                    "metadata_vector": metadata_vector.to_dict(),
+                    "filter": {}  # ✅ Empty filter - let FAISS return all matches
                 }
                 
                 retrieval_response = await self.retriever.process(retrieval_input)
+                self._extract_and_aggregate_token_usage(retrieval_response)
                 if retrieval_response.metadata.get("error"):
                     logger.warning(f"Retrieval failed for subquery: {subquery['query']}")
                     continue
@@ -467,7 +491,7 @@ class MARAGOrchestrator:
             logger.debug(f"  - Empty documents: {docs_empty}")
             
             extractor_response = await self.extractor.process(extractor_input)
-            
+            self._extract_and_aggregate_token_usage(extractor_response)
             
             if extractor_response.metadata.get("error"):
                 raise Exception(f"Extractor failed: {extractor_response.metadata.get('error')}")
@@ -492,6 +516,7 @@ class MARAGOrchestrator:
             }
             
             qa_response = await self.qa.process(qa_input)
+            self._extract_and_aggregate_token_usage(qa_response)
             if qa_response.metadata.get("error"):
                 raise Exception(f"QA agent failed: {qa_response.metadata.get('error')}")
             

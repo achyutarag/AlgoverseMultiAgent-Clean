@@ -372,20 +372,20 @@ Your response MUST be a valid JSON object with this exact structure:
             logger.debug(f"Using {len(context)} context items, min_confidence={min_confidence}")
             logger.debug(f"Prompt length: {len(prompt)} characters")
             
-            # Get the LLM response
-            response = await self.generate_text(
+            # Get the LLM response with token tracking
+            response_text, token_usage = await self.generate_text_with_usage(
                 prompt=prompt,
                 temperature=self.temperature
             )
             
-            logger.debug(f"LLM response length: {len(response)} characters")
-            logger.debug(f"LLM response preview: {response[:200]}...")
+            logger.debug(f"LLM response length: {len(response_text)} characters")
+            logger.debug(f"LLM response preview: {response_text[:200]}...")
             
-            if not response or not response.strip():
+            if not response_text or not response_text.strip():
                 raise ValueError("Empty response from LLM")
             
             # Postprocess the LLM response
-            response = tokenization_utils.postprocess_answer(response, output_type="json")
+            response = tokenization_utils.postprocess_answer(response_text, output_type="json")
             
             try:
                 # Extract JSON from the response
@@ -472,7 +472,8 @@ Your response MUST be a valid JSON object with this exact structure:
                         "max_history": max_history,
                         "min_confidence": min_confidence,
                         "temperature": self.temperature
-                    }
+                    },
+                    "token_usage": token_usage
                 }
                 
                 return AgentResponse(

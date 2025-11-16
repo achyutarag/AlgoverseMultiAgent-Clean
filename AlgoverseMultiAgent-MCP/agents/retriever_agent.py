@@ -350,7 +350,7 @@ class RetrieverAgent(BaseAgent):
                         "min_similarity": min_similarity,
                         "filter": filter_criteria,
                         "model": self.embeddings.model_name,
-                        "batch_size": self.batch_size
+                        "batch_size": self.batch_size,
                         "metadata_vector_used": metadata_vector.to_dict() if metadata_vector else None 
                     },
                     "documents": results  # Include full document data in metadata

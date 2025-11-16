@@ -99,3 +99,29 @@ class BaseAgent(ABC):
                 raise Exception(f"Model not found or not supported. Please check model configuration. Original error: {error_msg}")
             else:
                 raise Exception(f"Error in text generation: {error_msg}")
+    
+    async def generate_text_with_usage(self, prompt: str, **kwargs) -> tuple[str, Dict[str, int]]:
+        """
+        Generate text using the agent's LLM and return token usage.
+        
+        Args:
+            prompt: The input prompt
+            **kwargs: Additional generation parameters
+            
+        Returns:
+            Tuple of (generated_text, token_usage_dict) where token_usage_dict contains:
+            - prompt_tokens: Number of tokens in the input prompt
+            - generated_tokens: Number of tokens in the generated text
+            - total_tokens: Total tokens used
+        """
+        try:
+            response = await self.llm.generate(prompt, **kwargs)
+            return response.text, response.usage
+        except Exception as e:
+            error_msg = str(e)
+            if "quota" in error_msg.lower() or "rate limit" in error_msg.lower():
+                raise Exception(f"API quota exceeded. Please wait before retrying. Original error: {error_msg}")
+            elif "404" in error_msg and "not found" in error_msg.lower():
+                raise Exception(f"Model not found or not supported. Please check model configuration. Original error: {error_msg}")
+            else:
+                raise Exception(f"Error in text generation: {error_msg}")
