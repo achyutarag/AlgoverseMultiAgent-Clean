@@ -117,14 +117,16 @@ async def evaluate_dataset(dataset_name: str, dataset_name_full: str, dataset_co
             else:
                 prediction = str(result)
             
-            # Estimate token usage (approximate) - MOVED HERE, after prediction is extracted
-            # Rough estimate: ~0.75 tokens per word for English text
-            prediction_tokens = int(len(prediction.split()) * 0.75)
-            # Estimate input tokens based on question + documents length
-            question_tokens = int(len(question.split()) * 0.75)
-            # Rough estimate: each document adds ~100-200 tokens on average
-            estimated_doc_tokens = len(documents) * 150 if documents else 0
-            total_tokens_estimate = prediction_tokens + question_tokens + estimated_doc_tokens
+            # Get actual token usage from pipeline result
+            token_usage = result.token_usage if hasattr(result, 'token_usage') else {}
+            total_tokens_estimate = token_usage.get("total_tokens", 0)
+            # If token_usage is empty, fall back to estimate (for backward compatibility)
+            if total_tokens_estimate == 0:
+                # Rough estimate: ~0.75 tokens per word for English text
+                prediction_tokens = int(len(prediction.split()) * 0.75)
+                question_tokens = int(len(question.split()) * 0.75)
+                estimated_doc_tokens = len(documents) * 150 if documents else 0
+                total_tokens_estimate = prediction_tokens + question_tokens + estimated_doc_tokens
             
             # Post-process prediction for evaluation: extract concise answer
             # For yes/no questions, extract just "yes" or "no" from verbose answers
@@ -215,8 +217,10 @@ async def evaluate_dataset(dataset_name: str, dataset_name_full: str, dataset_co
                 "ground_truth": ground_truth,
                 "exact_match": em_score,
                 "f1_score": f1,
-                "latency": latency,  # Add this
-                "tokens": total_tokens_estimate  # Add this
+                "latency": latency,
+                "tokens": total_tokens_estimate,
+                "input_tokens": token_usage.get("prompt_tokens", 0),
+                "output_tokens": token_usage.get("generated_tokens", 0)
             })
             
             print(f"Exact Match: {em_score:.3f}, F1: {f1:.3f}")
@@ -236,16 +240,21 @@ async def evaluate_dataset(dataset_name: str, dataset_name_full: str, dataset_co
     # Calculate overall metrics
     avg_em = total_em / len(results)
     avg_f1 = total_f1 / len(results)
-    avg_latency = total_latency / len(results)  # Add this
-    avg_tokens = total_tokens / len(results)  # Add this
+    avg_latency = total_latency / len(results)
+    avg_tokens = total_tokens / len(results) if results else 0
+    # Calculate average input and output tokens
+    total_input_tokens = sum(r.get("input_tokens", 0) for r in results)
+    total_output_tokens = sum(r.get("output_tokens", 0) for r in results)
+    avg_input_tokens = total_input_tokens / len(results) if results else 0
+    avg_output_tokens = total_output_tokens / len(results) if results else 0
     
     print(f"\n{'='*60}")
     print(f"{dataset_name} Results:")
     print(f"Exact Match: {avg_em:.4f}")
     print(f"F1 Score:    {avg_f1:.4f}")
-    print(f"Latency/Q:   {avg_latency:.2f}s")  # Add this
-    print(f"Total Latency: {total_latency:.2f}s")  # Add this
-    print(f"Tokens/Q:    {avg_tokens:.0f}")  # Add this
+    print(f"Latency/Q:   {avg_latency:.2f}s")
+    print(f"Total Latency: {total_latency:.2f}s")
+    print(f"Tokens/Q: {avg_tokens:.0f} (Input: {avg_input_tokens:.0f}, Output: {avg_output_tokens:.0f})")
     print(f"Examples:    {len(results)}")
     print(f"{'='*60}")
     
@@ -260,7 +269,7 @@ async def evaluate_dataset(dataset_name: str, dataset_name_full: str, dataset_co
     # Write CSV
     with open(csv_filename, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["Question", "Prediction", "Ground_Truth", "ExactMatch", "F1Score", "Latency(s)", "Tokens"])
+        writer.writerow(["Question", "Prediction", "Ground_Truth", "ExactMatch", "F1Score", "Latency(s)", "Total_Tokens", "Input_Tokens", "Output_Tokens"])
         
         for result in results:
             writer.writerow([
@@ -270,18 +279,20 @@ async def evaluate_dataset(dataset_name: str, dataset_name_full: str, dataset_co
                 result["exact_match"],
                 result["f1_score"],
                 f"{result['latency']:.2f}",
-                result["tokens"]
+                result.get("tokens", 0),
+                result.get("input_tokens", 0),
+                result.get("output_tokens", 0)
             ])
         
         # Add summary metrics
         writer.writerow([])  # Empty row for spacing
-        writer.writerow(["Summary", "", "", "", "", "", ""])
-        writer.writerow(["Exact Match", "", "", f"{avg_em:.4f}", "", "", ""])
-        writer.writerow(["F1 Score", "", "", f"{avg_f1:.4f}", "", "", ""])
-        writer.writerow(["Latency/Q (s)", "", "", f"{avg_latency:.2f}", "", "", ""])
-        writer.writerow(["Total Latency (s)", "", "", f"{total_latency:.2f}", "", "", ""])
-        writer.writerow(["Tokens/Q", "", "", f"{avg_tokens:.0f}", "", "", ""])
-        writer.writerow(["Examples", "", "", f"{len(results)}", "", "", ""])
+        writer.writerow(["Summary", "", "", "", "", "", "", "", ""])
+        writer.writerow(["Exact Match", "", "", f"{avg_em:.4f}", "", "", "", "", ""])
+        writer.writerow(["F1 Score", "", "", f"{avg_f1:.4f}", "", "", "", "", ""])
+        writer.writerow(["Latency/Q (s)", "", "", f"{avg_latency:.2f}", "", "", "", "", ""])
+        writer.writerow(["Total Latency (s)", "", "", f"{total_latency:.2f}", "", "", "", "", ""])
+        writer.writerow(["Tokens/Q", "", "", f"{avg_tokens:.0f}", "", "", f"{avg_tokens:.0f}", f"{avg_input_tokens:.0f}", f"{avg_output_tokens:.0f}"])
+        writer.writerow(["Examples", "", "", f"{len(results)}", "", "", "", "", ""])
     
     # Create/update experiments index file
     index_file = os.path.join(results_dir, "experiments_index.txt")

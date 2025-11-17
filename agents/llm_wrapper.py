@@ -109,14 +109,35 @@ class GoogleGeminiLLM(BaseLLMWrapper):
             # Extract the generated text
             generated_text = response.text if response.text else ""
             
+            # Extract actual token usage from API response
+            prompt_tokens = 0
+            generated_tokens = 0
+            total_tokens = 0
+            
+            if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                # Gemini API provides actual token counts
+                prompt_tokens = getattr(response.usage_metadata, 'prompt_token_count', 0)
+                generated_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0)
+                total_tokens = getattr(response.usage_metadata, 'total_token_count', 0)
+                
+                # If total_token_count is not available, calculate it
+                if total_tokens == 0:
+                    total_tokens = prompt_tokens + generated_tokens
+            else:
+                # Fallback to word count estimate if usage_metadata not available
+                logger.warning("usage_metadata not available, using word count estimate")
+                prompt_tokens = len(prompt.split())
+                generated_tokens = len(generated_text.split())
+                total_tokens = prompt_tokens + generated_tokens
+            
             return LLMResponse(
                 text=generated_text,
                 model_name=self.config.model_name,
                 model_type="google_gemini",
                 usage={
-                    "prompt_tokens": len(prompt.split()),
-                    "generated_tokens": len(generated_text.split()),
-                    "total_tokens": len(prompt.split()) + len(generated_text.split())
+                    "prompt_tokens": prompt_tokens,
+                    "generated_tokens": generated_tokens,
+                    "total_tokens": total_tokens
                 }
             )
             

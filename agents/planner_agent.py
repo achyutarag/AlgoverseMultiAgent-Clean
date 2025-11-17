@@ -133,14 +133,19 @@ Return a JSON object with ONLY these fields:
 
 Return ONLY the JSON, nothing else."""
             
-            # Generate basic plan info
-            basic_response = await self.generate_text(
+            # Generate basic plan info with token tracking
+            basic_response_text, basic_token_usage = await self.generate_text_with_usage(
                 basic_prompt,
                 temperature=0.2,
                 max_new_tokens=512
             )
+            total_token_usage = {
+                "prompt_tokens": basic_token_usage.get("prompt_tokens", 0),
+                "generated_tokens": basic_token_usage.get("generated_tokens", 0),
+                "total_tokens": basic_token_usage.get("total_tokens", 0)
+            }
             
-            basic_response = tokenization_utils.postprocess_answer(basic_response, output_type="json")
+            basic_response = tokenization_utils.postprocess_answer(basic_response_text, output_type="json")
             
             try:
                 clean_basic = TokenizationUtils.repair_json(basic_response)
@@ -180,13 +185,17 @@ Generate step {step_num} to answer this question. Return a JSON object:
 
 Return ONLY the JSON."""
                 
-                step_response = await self.generate_text(
+                step_response_text, step_token_usage = await self.generate_text_with_usage(
                     step_prompt,
                     temperature=0.2,
                     max_new_tokens=512
                 )
+                # Aggregate token usage
+                total_token_usage["prompt_tokens"] += step_token_usage.get("prompt_tokens", 0)
+                total_token_usage["generated_tokens"] += step_token_usage.get("generated_tokens", 0)
+                total_token_usage["total_tokens"] += step_token_usage.get("total_tokens", 0)
                 
-                step_response = tokenization_utils.postprocess_answer(step_response, output_type="json")
+                step_response = tokenization_utils.postprocess_answer(step_response_text, output_type="json")
                 
                 try:
                     clean_step = TokenizationUtils.repair_json(step_response)
@@ -264,7 +273,8 @@ Return ONLY the JSON."""
                         "max_steps": max_steps,
                         "model": self.model_name,
                         "temperature": 0.2
-                    }
+                    },
+                    "token_usage": total_token_usage
                 }
             )
                 

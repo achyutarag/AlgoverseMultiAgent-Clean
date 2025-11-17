@@ -285,8 +285,8 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
             logger.info(f"Performing fine-grained extraction for subquery: {query[:100]}...")
             #logger.debug(f"Processing {len(documents)} documents with min_relevance={min_relevance}")
             
-            # Get the LLM response
-            response = await self.generate_text(
+            # Get the LLM response with token tracking
+            response_text, token_usage = await self.generate_text_with_usage(
                 prompt=prompt,
                 temperature=self.temperature,
                 max_new_tokens=self.max_tokens
@@ -300,13 +300,13 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
             # logger.debug("=" * 80)
             # logger.debug("RAW LLM RESPONSE (BEFORE POSTPROCESSING):")
             # logger.debug("=" * 80)
-            # logger.debug(f"Response type: {type(response)}")
-            # logger.debug(f"Response length: {len(str(response))} characters")
-            # logger.debug(f"Full response:\n{response}")
+            # logger.debug(f"Response type: {type(response_text)}")
+            # logger.debug(f"Response length: {len(str(response_text))} characters")
+            # logger.debug(f"Full response:\n{response_text}")
             # logger.debug("=" * 80)
 
             # Postprocess the LLM response
-            response = tokenization_utils.postprocess_answer(response, output_type="json")
+            response = tokenization_utils.postprocess_answer(response_text, output_type="json")
 
             # DEBUG: Log response AFTER postprocessing
             # logger.debug("=" * 80)
@@ -440,7 +440,8 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
                             "model": self.model_name,
                             "temperature": self.temperature
                         },
-                        "extracted_passages": deduplicated_passages  # Include in metadata for easy access
+                        "extracted_passages": deduplicated_passages,  # Include in metadata for easy access
+                        "token_usage": token_usage
                     }
                 )
                 

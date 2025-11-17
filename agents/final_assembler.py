@@ -332,13 +332,14 @@ class FinalAssembler:
     
     async def _synthesize_multihop_answer(self, query: str, step_answers: List[Dict[str, Any]]) -> str:
         """Synthesize answer for multi-hop questions."""
-        synthesis = f"Based on the step-by-step analysis:\n\n"
+        if not step_answers:
+            return "No information found to answer your question."
         
-        for i, step_answer in enumerate(step_answers, 1):
-            synthesis += f"Step {i}: {step_answer['answer']}\n\n"
+        # For multi-hop, use the final step answer and extract concise version
+        final_answer = step_answers[-1]["answer"]
+        final_answer = self._extract_concise_answer(query, final_answer)
         
-        synthesis += "This multi-step reasoning provides a comprehensive answer to your question."
-        return synthesis
+        return final_answer
     
     async def _synthesize_analytical_answer(self, query: str, step_answers: List[Dict[str, Any]]) -> str:
         """Synthesize answer for analytical questions."""
@@ -376,12 +377,17 @@ class FinalAssembler:
             if yes_no_match:
                 return yes_no_match.group(1).capitalize()
         
-        # For single answer, return it directly
+        # For single answer, extract concise version
         if len(step_answers) == 1:
-            return best_answer["answer"]
+            answer = best_answer["answer"]
+            # Extract concise answer based on question type
+            answer = self._extract_concise_answer(query, answer)
+            return answer
         
         # For multiple answers, use the LAST step answer (final conclusion)
         final_step_answer = step_answers[-1]["answer"]
+        # Extract concise answer
+        final_step_answer = self._extract_concise_answer(query, final_step_answer)
         
         # Minimal safety net: if still too long, use first sentence
         if len(final_step_answer) > 200:
@@ -390,6 +396,121 @@ class FinalAssembler:
                 return sentences[0].strip() + "."
         
         return final_step_answer
+    
+    def _extract_concise_answer(self, query: str, answer: str) -> str:
+        """
+        Extract concise answer from potentially verbose QA response.
+        
+        Args:
+            query: The original question
+            answer: The answer from QA agent (might be a sentence)
+            
+        Returns:
+            Concise answer (entity name, number, yes/no, etc.)
+        """
+        import re
+        
+        query_lower = query.lower()
+        answer = answer.strip()
+        answer_lower = answer.lower()
+        
+        # Yes/No questions - already handled above, but add as fallback
+        if any(keyword in query_lower for keyword in ["yes or no", "is it", "are they", "do they", "does", "did", "was", "were"]):
+            yes_no_match = re.search(r'\b(yes|no)\b', answer_lower)
+            if yes_no_match:
+                return yes_no_match.group(1).capitalize()
+        
+        # Entity name questions (Who, What is the name of, formed by, created by, etc.)
+        if any(keyword in query_lower for keyword in [
+            "who", "what is the name", "what is called", "formed by", "created by", 
+            "directed by", "written by", "produced by", "performed by"
+        ]):
+            # Try to extract proper noun (capitalized words)
+            # Look for patterns like "X is Y" or "Y, which is X" or just "Y"
+            # Extract the most likely entity name
+            
+            # Pattern 1: "X is based in Y" -> extract Y
+            if " is based in " in answer_lower or " based in " in answer_lower:
+                match = re.search(r'based in\s+([A-Z][^,\.]+(?:,\s*[A-Z][^,\.]+)?)', answer)
+                if match:
+                    return match.group(1).strip()
+            
+            # Pattern 2: "X, which was formed by Y" -> extract Y
+            if " formed by " in answer_lower or "which was formed by" in answer_lower:
+                match = re.search(r'formed by\s+([A-Z][^,\.]+(?:,\s*[A-Z][^,\.]+)?)', answer)
+                if match:
+                    return match.group(1).strip()
+            
+            # Pattern 3: "X managed Y from Z to W" -> extract "from Z to W"
+            if " managed " in answer_lower and ("from" in answer_lower or "during" in answer_lower):
+                match = re.search(r'(from\s+\d+\s+(?:until|to)\s+\d+)', answer_lower)
+                if match:
+                    return match.group(1)
+                match = re.search(r'(\d+\s+until\s+\d+)', answer_lower)
+                if match:
+                    return match.group(1)
+            
+            # Pattern 4: Extract first proper noun phrase (capitalized words)
+            # Look for sequences of capitalized words
+            entity_match = re.search(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*(?:\s+[A-Z][a-z]+)*)\b', answer)
+            if entity_match:
+                entity = entity_match.group(1)
+                # Don't return if it's too long (likely a sentence start)
+                if len(entity.split()) <= 5:
+                    return entity
+        
+        # Location questions (in what city, located in, based in what)
+        if any(keyword in query_lower for keyword in ["in what", "located in what", "based in what", "in what city"]):
+            # Extract location pattern: "City, State" or "Neighborhood, City"
+            location_match = re.search(r'([A-Z][^,\.]+,\s*[A-Z][^,\.]+)', answer)
+            if location_match:
+                return location_match.group(1).strip()
+            # Fallback: extract after "in" or "based in"
+            if " based in " in answer_lower:
+                match = re.search(r'based in\s+([A-Z][^,\.]+(?:,\s*[A-Z][^,\.]+)?)', answer)
+                if match:
+                    return match.group(1).strip()
+        
+        # Number questions (how many, how much, what capacity, population)
+        if any(keyword in query_lower for keyword in [
+            "how many", "how much", "what number", "what capacity", "population"
+        ]):
+            # Extract number with optional unit
+            number_match = re.search(r'(\d+(?:,\d+)*(?:\.\d+)?)\s*([a-z]+)?', answer_lower)
+            if number_match:
+                num = number_match.group(1)
+                unit = number_match.group(2) if number_match.group(2) else ""
+                result = f"{num} {unit}".strip()
+                # Also check for "inhabitants", "seated", etc. that might be elsewhere
+                if "inhabitants" in answer_lower and "inhabitants" not in result:
+                    result = f"{num} inhabitants"
+                elif "seated" in answer_lower and "seated" not in result:
+                    result = f"{num} seated"
+                return result
+        
+        # Time period questions (during what years, what timeframe, served during)
+        if any(keyword in query_lower for keyword in ["during what years", "what timeframe", "served during", "during what timeframe"]):
+            # Extract time period with connector
+            time_match = re.search(r'(from\s+\d+\s+(?:until|to)\s+\d+)', answer_lower)
+            if time_match:
+                return time_match.group(1)
+            time_match = re.search(r'(\d+\s+until\s+\d+)', answer_lower)
+            if time_match:
+                return time_match.group(1)
+            time_match = re.search(r'(\d+\s+to\s+\d+)', answer_lower)
+            if time_match:
+                return time_match.group(1)
+        
+        # Default: return first sentence if answer is too long, otherwise return as-is
+        if len(answer) > 100:
+            first_sentence = answer.split('.')[0].strip()
+            if len(first_sentence) < 150 and len(first_sentence) > 0:
+                return first_sentence
+            # If first sentence is still long, try to extract key phrase
+            return answer[:80].strip()
+        
+        return answer
+    
     async def _calculate_overall_confidence(self, processed_steps: List[Dict[str, Any]]) -> float:
         """
         Calculate overall confidence score.
