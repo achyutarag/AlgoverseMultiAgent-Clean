@@ -66,6 +66,135 @@ class LocalEmbeddings(Embeddings):
             return [self.embed_query(texts)]
         return self.embed_documents(texts)
 
+class SparseFeatureExtractor:
+    """
+    Extracts sparse feature representations from documents.
+    Features: Structural (S), Existential (E), Relational (R)
+    
+    Creates sparse feature vectors where most dimensions are 0,
+    representing which features are present in each document.
+    """
+    
+    def __init__(self):
+        # Feature keywords for each dimension
+        self.structural_keywords = [
+            "date", "year", "number", "count", "percentage", "ratio", 
+            "measurement", "unit", "amount", "quantity", "how many", 
+            "how much", "when", "time", "age", "size", "length", "width",
+            "capacity", "seated", "population", "inhabitants"
+        ]
+        
+        self.existential_keywords = [
+            "current", "recent", "latest", "new", "now", "today", 
+            "verified", "confirmed", "official", "authoritative",
+            "published", "established", "founded", "created"
+        ]
+        
+        self.relational_keywords = {
+            "compare": ["compare", "difference", "versus", "vs", "better", 
+                       "worse", "similar", "different", "than", "more", "less",
+                       "both", "same", "different", "alike"],
+            "temporal": ["when", "before", "after", "first", "earlier", 
+                        "later", "chronology", "timeline", "during", "since",
+                        "timeframe", "years", "period"],
+            "cause-effect": ["because", "cause", "effect", "result", "led to", 
+                            "due to", "reason", "why", "therefore", "consequently"],
+            "infer": ["how", "would", "could", "should", "predict", "infer", 
+                     "imply", "suggest", "indicate"],
+            "join": ["and", "also", "additionally", "furthermore", "moreover", 
+                    "related", "connected", "associated"]
+        }
+    
+    def extract_sparse_features(self, doc: Document) -> Dict[str, float]:
+        """
+        Extract sparse feature vector from document.
+        
+        Returns:
+            Dictionary with 'structural', 'existential', 'relational' scores (0.0-1.0)
+            and 'relational_types' dict with scores for each relational type
+        """
+        content = doc.page_content.lower()
+        metadata = doc.metadata
+        
+        # Structural features (format/units)
+        structural_score = self._extract_structural_features(content, metadata)
+        
+        # Existential features (trust/recency)
+        existential_score = self._extract_existential_features(content, metadata)
+        
+        # Relational features (relationship types)
+        relational_scores = self._extract_relational_features(content)
+        
+        return {
+            "structural": structural_score,
+            "existential": existential_score,
+            "relational": max(relational_scores.values()) if relational_scores else 0.0,
+            "relational_types": relational_scores  # Sparse: only non-zero types
+        }
+    
+    def _extract_structural_features(self, content: str, metadata: Dict) -> float:
+        """Extract structural feature score."""
+        # Count structural keywords
+        keyword_count = sum(1 for kw in self.structural_keywords if kw in content)
+        
+        # Check for numbers/dates
+        has_numbers = bool(re.search(r'\d+', content))
+        has_dates = bool(re.search(r'\b(19|20)\d{2}\b', content))
+        
+        # Check metadata for structural indicators
+        metadata_structural = 0.0
+        if "year" in metadata or "date" in metadata or "number" in metadata:
+            metadata_structural = 0.3
+        
+        # Normalize to 0-1 (sparse: most docs will be 0-0.3)
+        base_score = min(1.0, keyword_count / 5.0)  # Sparse: few keywords = low score
+        number_boost = 0.2 if has_numbers else 0.0
+        date_boost = 0.2 if has_dates else 0.0
+        
+        return min(1.0, base_score + number_boost + date_boost + metadata_structural)
+    
+    def _extract_existential_features(self, content: str, metadata: Dict) -> float:
+        """Extract existential feature score."""
+        # Count existential keywords
+        keyword_count = sum(1 for kw in self.existential_keywords if kw in content)
+        
+        # Check metadata for recency
+        recency_score = 0.0
+        if "year" in metadata:
+            try:
+                year = int(str(metadata["year"]))
+                # Normalize: recent years (2020+) = high score
+                if year >= 2020:
+                    recency_score = 0.8
+                elif year >= 2010:
+                    recency_score = 0.5
+                elif year >= 2000:
+                    recency_score = 0.3
+            except (ValueError, TypeError):
+                pass
+        
+        # Check for verification indicators
+        verified_score = 0.0
+        if any(kw in content for kw in ["verified", "confirmed", "official", "authoritative"]):
+            verified_score = 0.3
+        
+        # Normalize (sparse: most docs will be 0-0.4)
+        base_score = min(0.4, keyword_count / 3.0)
+        
+        return min(1.0, base_score + recency_score + verified_score)
+    
+    def _extract_relational_features(self, content: str) -> Dict[str, float]:
+        """Extract relational feature scores (sparse: only non-zero types)."""
+        scores = {}
+        
+        for rel_type, keywords in self.relational_keywords.items():
+            keyword_count = sum(1 for kw in keywords if kw in content)
+            if keyword_count > 0:
+                # Sparse: only include if > 0
+                scores[rel_type] = min(1.0, keyword_count / 3.0)
+        
+        return scores  # Sparse dict: only non-zero types
+
 class RetrieverAgent(BaseAgent):
     """
     Enhanced Retriever Agent using FAISS for fast, scalable search over large corpora.
@@ -105,6 +234,10 @@ class RetrieverAgent(BaseAgent):
         self.top_k = top_k
         self.min_similarity = min_similarity
         self.batch_size = batch_size
+        
+        # Initialize sparse feature extractor for metadata-guided reranking
+        self.sparse_extractor = SparseFeatureExtractor()
+        self._document_features_cache = {}  # Cache sparse features for performance
         
         if documents:
             self._create_vector_store(documents)
@@ -217,6 +350,76 @@ class RetrieverAgent(BaseAgent):
         
         # All filters passed (or no hard filters applied)
         return True
+    
+    def _calculate_metadata_alignment_score(
+        self,
+        doc: Document,
+        doc_features: Dict[str, float],
+        metadata_vector: Any,  # MetadataVector type
+        base_similarity: float
+    ) -> float:
+        """
+        Calculate reranking score using sparse feature alignment with normalization.
+        
+        Uses cosine similarity for dimension alignment (measures alignment, not magnitude)
+        and relational type matching for sparse matching bonus.
+        
+        Args:
+            doc: Document
+            doc_features: Sparse features extracted from document
+            metadata_vector: Query metadata vector
+            base_similarity: Base semantic similarity from FAISS
+            
+        Returns:
+            Reranked score (0.0-1.0)
+        """
+        # Extract query vector
+        query_vector = np.array([
+            metadata_vector.structural,
+            metadata_vector.existential,
+            metadata_vector.relational
+        ])
+        
+        # Extract document sparse features
+        doc_vector = np.array([
+            doc_features.get("structural", 0.0),
+            doc_features.get("existential", 0.0),
+            doc_features.get("relational", 0.0)
+        ])
+        
+        # 1. Cosine similarity for dimension alignment (normalized)
+        # This measures alignment, not magnitude
+        dot_product = np.dot(query_vector, doc_vector)
+        norm_query = np.linalg.norm(query_vector)
+        norm_doc = np.linalg.norm(doc_vector)
+        
+        if norm_query > 0 and norm_doc > 0:
+            dimension_alignment = dot_product / (norm_query * norm_doc)
+        else:
+            dimension_alignment = 0.0
+        
+        # 2. Relational type matching (sparse: only if types match)
+        relational_bonus = 0.0
+        doc_relational_types = doc_features.get("relational_types", {})
+        if metadata_vector.relational_type in doc_relational_types:
+            # Bonus for exact relational type match
+            type_match_score = doc_relational_types[metadata_vector.relational_type]
+            relational_bonus = (
+                metadata_vector.relational * 
+                type_match_score * 
+                0.25  # Up to 25% boost for type match
+            )
+        
+        # 3. Combine: base similarity + dimension alignment + relational bonus
+        # alpha controls how much metadata guidance matters (30% weight)
+        alpha = 0.3
+        reranked_score = (
+            base_similarity * (1 - alpha) +           # 70% base semantic similarity
+            dimension_alignment * alpha +              # 30% feature alignment
+            relational_bonus                           # Additional type match bonus
+        )
+        
+        return min(1.0, reranked_score)
 
     async def process(self, input_data: Dict[str, Any]) -> AgentResponse:
         """
@@ -253,65 +456,116 @@ class RetrieverAgent(BaseAgent):
             filter_criteria = input_data.get('filter', {})
             include_scores = bool(input_data.get('include_scores', True))
 
-            # NEW: Extract metadata vector if provided
+            # Extract metadata vector if provided
             metadata_vector_dict = input_data.get('metadata_vector', {})
+            metadata_vector = None
             if metadata_vector_dict:
                 from .metadata_vector import MetadataVector
                 try:
                     metadata_vector = MetadataVector(**metadata_vector_dict)
-                    logger.debug(f"Using metadata vector: S={metadata_vector.structural:.2f}, "
+                    logger.debug(f"Using metadata vector for reranking: S={metadata_vector.structural:.2f}, "
                                f"E={metadata_vector.existential:.2f}, "
                                f"R={metadata_vector.relational:.2f}, "
                                f"Type={metadata_vector.relational_type}")
                 except Exception as e:
                     logger.warning(f"Failed to parse metadata vector: {e}")
                     metadata_vector = None
-            else:
-                metadata_vector = None
+            
             # Log the retrieval request
             logger.info(f"Retrieving documents for query: {query[:100]}...")
             logger.debug(f"Parameters: k={k}, min_similarity={min_similarity}")
             
-            # Perform similarity search with scores
+            # Expand k if metadata vector is provided (to compensate for reranking)
+            k_expanded = k * 2 if metadata_vector else k
+            k_expanded = min(k_expanded, 30)  # Cap at 30 for performance
+            
+            # Perform similarity search with scores (retrieve more if reranking)
             docs_and_scores = self.vector_store.similarity_search_with_score(
                 query=query,
-                k=k,
+                k=k_expanded,
                 filter=filter_criteria
             )
             
-            # Process results
-            results = []
-            similarities = []
-            
-            for doc, score in docs_and_scores:
-                # Convert score to similarity (higher is better)
-                # FAISS returns distance, so we convert to similarity
-                similarity = 1.0 / (1.0 + score)
+            # Process results with reranking if metadata vector provided
+            if metadata_vector:
+                # Reranking approach: extract sparse features and rerank
+                scored_docs = []
                 
-                # Skip if below threshold
-                if similarity < min_similarity:
-                    continue
+                for doc, score in docs_and_scores:
+                    # Convert FAISS distance to similarity
+                    base_similarity = 1.0 / (1.0 + score)
                     
-                # Add document ID if not present
-                doc_id = doc.metadata.get('id', f"doc_{len(results)+1}")
-                doc.metadata['id'] = doc_id
-
-
-                # NEW: Apply metadata vector filtering
-                if metadata_vector:
-                    if not self._passes_metadata_filters(doc, metadata_vector):
-                        logger.debug(f"Document {doc_id} filtered out by metadata vector")
+                    # Skip if below minimum threshold
+                    if base_similarity < min_similarity:
                         continue
+                    
+                    # Get or extract sparse features
+                    doc_id = doc.metadata.get('id', f"doc_{len(scored_docs)+1}")
+                    if doc_id not in self._document_features_cache:
+                        doc_features = self.sparse_extractor.extract_sparse_features(doc)
+                        self._document_features_cache[doc_id] = doc_features
+                    else:
+                        doc_features = self._document_features_cache[doc_id]
+                    
+                    # Calculate reranked score using sparse feature alignment
+                    reranked_score = self._calculate_metadata_alignment_score(
+                        doc, doc_features, metadata_vector, base_similarity
+                    )
+                    
+                    scored_docs.append((doc, reranked_score, base_similarity, doc_features, doc_id))
+                
+                # Sort by reranked score (descending)
+                scored_docs.sort(key=lambda x: x[1], reverse=True)
+                
+                # Take top k after reranking
+                results = []
+                similarities = []
+                for doc, reranked_score, base_similarity, doc_features, doc_id in scored_docs[:k]:
+                    doc.metadata['id'] = doc_id
+                    
+                    doc_data = {
+                        "id": doc_id,
+                        "page_content": doc.page_content,
+                        "metadata": doc.metadata,
+                        "score": float(reranked_score) if include_scores else None,
+                        "base_similarity": float(base_similarity) if include_scores else None,
+                        "feature_alignment": {
+                            "structural": doc_features.get("structural", 0.0),
+                            "existential": doc_features.get("existential", 0.0),
+                            "relational": doc_features.get("relational", 0.0),
+                            "relational_types": doc_features.get("relational_types", {})
+                        } if include_scores else None
+                    }
+                    results.append(doc_data)
+                    similarities.append(reranked_score)
+                
+                logger.info(f"Reranked {len(scored_docs)} documents, returning top {len(results)}")
+            else:
+                # No metadata vector: use standard processing
+                results = []
+                similarities = []
+                
+                for doc, score in docs_and_scores:
+                    # Convert score to similarity (higher is better)
+                    similarity = 1.0 / (1.0 + score)
+                    
+                    # Skip if below threshold
+                    if similarity < min_similarity:
+                        continue
+                        
+                    # Add document ID if not present
+                    doc_id = doc.metadata.get('id', f"doc_{len(results)+1}")
+                    doc.metadata['id'] = doc_id
 
-                # Add to results
-                doc_data = {
-                    "id": doc_id,
-                    "page_content": doc.page_content,
-                    "metadata": doc.metadata,
-                    "score": float(similarity) if include_scores else None
-                }
-                results.append(doc_data)
-                similarities.append(similarity)
+                    # Add to results
+                    doc_data = {
+                        "id": doc_id,
+                        "page_content": doc.page_content,
+                        "metadata": doc.metadata,
+                        "score": float(similarity) if include_scores else None
+                    }
+                    results.append(doc_data)
+                    similarities.append(similarity)
             
             # Log retrieval results
             logger.info(f"Retrieved {len(results)} documents with average similarity: "
@@ -347,11 +601,13 @@ class RetrieverAgent(BaseAgent):
                     "max_score": float(max(similarities)) if similarities else 0.0,
                     "retrieval_parameters": {
                         "k": k,
+                        "k_expanded": k_expanded if metadata_vector else k,
                         "min_similarity": min_similarity,
                         "filter": filter_criteria,
                         "model": self.embeddings.model_name,
                         "batch_size": self.batch_size,
-                        "metadata_vector_used": metadata_vector.to_dict() if metadata_vector else None 
+                        "metadata_vector_used": metadata_vector.to_dict() if metadata_vector else None,
+                        "reranking_enabled": metadata_vector is not None
                     },
                     "documents": results  # Include full document data in metadata
                 }
