@@ -1,0 +1,29 @@
+Question,Prediction,Ground_Truth,ExactMatch,F1Score,Latency(s),Total_Tokens,Input_Tokens,Output_Tokens
+Were Scott Derrickson and Ed Wood of the same nationality?,yes,yes,1.0,1.0,68.62,36397,25969,3407
+What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?,Chief,Chief of Protocol,0.0,0.5,102.84,45625,27712,4081
+"What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?","Animorphs is a science fantasy young adult series, told in first person, with co",Animorphs,0.0,0.14285714285714288,125.83,55210,31933,7006
+Are the Laleli Mosque and Esma Sultan Mansion located in the same neighborhood?,no,no,1.0,1.0,66.04,35845,26118,3827
+"The director of the romantic comedy ""Big Stone Gap"" is based in what New York city?","Greenwich Village, New York City","Greenwich Village, New York City",1.0,1.0,70.86,37595,27236,3265
+2014 S/S is the debut album of a South Korean boy group that was formed by who?,Entertainment,YG Entertainment,0.0,0.6666666666666666,85.90,40937,27260,3551
+Who was known by his stage name Aladin and helped organizations improve their performance as a consultant?,Eenasul Fateh,Eenasul Fateh,1.0,1.0,94.11,45756,30195,4684
+The arena where the Lewiston Maineiacs played their home games can seat how many people?,"3,677 seated","3,677 seated",1.0,1.0,57.21,37474,28834,3524
+"Who is older, Annie Morton or Terry Richardson?",Terry Richardson,Terry Richardson,1.0,1.0,72.90,39140,27539,4086
+Are Local H and For Against both from the United States?,yes,yes,1.0,1.0,109.68,46641,27738,4646
+"What is the name of the fight song of the university whose main campus is in Lawrence, Kansas and whose branch campuses are in the Kansas City metropolitan area?",Kansas Song,Kansas Song,1.0,1.0,71.07,39954,29079,3894
+"What screenwriter with credits for ""Evolution"" co-wrote a film starring Nicolas Cage and Téa Leoni?",David Weissman,David Weissman,1.0,1.0,79.46,40210,27570,3434
+What year did Guns N Roses perform a promo for a movie starring Arnold Schwarzenegger as a former New York Police detective?,1999,1999,1.0,1.0,97.47,45592,29560,5407
+Are Random House Tower and 888 7th Avenue both used for real estate?,yes,no,0.0,0.0,110.96,48075,29385,5077
+The football manager who recruited David Beckham managed Manchester United during what timeframe?,1986 to 2013,from 1986 to 2013,0.0,0.8571428571428571,100.51,44591,27425,4131
+Brown State Fishing Lake is in a country that has a population of how many inhabitants ?,"Kansas, United States","9,984",0.0,0.0,82.50,41667,27852,3766
+The Vermont Catamounts men's soccer team currently competes in a conference that was formerly known as what from 1988 to 1996?,North Atlantic Conference,the North Atlantic Conference,1.0,1.0,76.84,41956,28812,3847
+Are Giuseppe Verdi and Ambroise Thomas both Opera composers ?,yes,yes,1.0,1.0,102.37,46751,28648,6576
+Roger O. Egeberg was Assistant Secretary for Health and Scientific Affairs during the administration of a president that served during what years?,1969 until 1974,1969 until 1974,1.0,1.0,79.67,42524,29299,4239
+"Which writer was from England, Henry Roth or Robert Erskine Childers?",Robert Erskine Childers,Robert Erskine Childers DSC,0.0,0.8571428571428571,65.93,36328,25761,3851
+
+Summary,,,,,,,,
+Exact Match,,,0.6500,,,,,
+F1 Score,,,0.8012,,,,,
+Latency/Q (s),,,86.04,,,,,
+Total Latency (s),,,1720.77,,,,,
+Tokens/Q,,,42413,,,42413,28196,4315
+Examples,,,20,,,,,

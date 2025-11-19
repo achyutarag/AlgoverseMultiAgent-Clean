@@ -241,12 +241,13 @@ You are performing a FACTUAL LOOKUP operation. Your task is to:
             if overall_query:
                 prompt += f"\n\n### ORIGINAL QUESTION (USE TO GUIDE ANSWER FORMAT):\n{overall_query}\n"
             
-            # Add previous answers if available
+            # Add previous answers if available (for context only, NOT to include in answer)
             if previous_answers:
-                prompt += "\n\n### Previous Step Answers:"
+                prompt += "\n\n### Previous Step Answers (FOR CONTEXT ONLY - DO NOT include these in your answer):"
                 for step_id, answer in previous_answers.items():
                     answer_preview = str(answer)[:200] + "..." if len(str(answer)) > 200 else str(answer)
                     prompt += f"\n- Step {step_id}: {answer_preview}"
+                prompt += "\n\nIMPORTANT: The previous step answers above are provided for context to help you understand the question. DO NOT include them in your answer. Answer ONLY what the current subquery asks for."
             
             # Add conversation history if available
             if history:
@@ -269,6 +270,14 @@ You are performing a FACTUAL LOOKUP operation. Your task is to:
                     f"Text: {text}\n"
                     f"Reasoning: {reasoning}\n"
                 )
+            
+            # Add general instruction for using evidence as-provided
+            prompt += "\n\n### ⚠️ IMPORTANT: Using Evidence As-Provided"
+            prompt += "\n- Extract answers DIRECTLY from the evidence provided above"
+            prompt += "\n- DO NOT reject or modify answers based on the year or date of the data"
+            prompt += "\n- Use the information as it appears in the evidence, regardless of when it's from"
+            prompt += "\n- If multiple pieces of evidence exist, use the one that most directly answers the question"
+            prompt += "\n- Your job is to extract the answer from the evidence, not to judge its recency or accuracy"
             
             # Add instructions for synthesis
             prompt += f"""
@@ -318,8 +327,10 @@ Your response MUST be a valid JSON object with this exact structure:
 **4. Specific Positions/Titles (e.g., "What position did X hold?", "What was X's role?")**
    - Rule: Extract ONLY ONE position - the most significant/relevant one if multiple exist
    - ❌ WRONG: "[position1] and [position2] and [position3]" (listing multiple)
-   - ❌ WRONG: "[position] of [country/organization]" (adding irrelevant context)
-   - ✅ CORRECT: "[position name]" (ONE position - extract the most significant/relevant one)
+   - ❌ WRONG: "[position] of [country/organization]" (adding irrelevant organizational context like "Chief of Protocol of the United States" → should be "Chief of Protocol")
+   - ✅ CORRECT: "[position name]" (ONE position - extract the FULL position title if it's multi-word)
+   - ✅ CORRECT: "Chief of Protocol" (preserve full multi-word titles - "of Protocol" is part of the title)
+   - ❌ WRONG: "Chief" (truncated - missing "of Protocol" which is part of the position name)
    - Rule: If the question asks for "a position" or "the position" (singular) but evidence shows multiple positions:
      * Extract ONLY ONE position based on the evidence, prioritizing in this order:
        1. **Historical significance** (first person to hold it, barrier-breaking, notable achievement)
@@ -327,7 +338,9 @@ Your response MUST be a valid JSON object with this exact structure:
        3. **Most directly relevant to question context** (if question mentions specific time period, event, or achievement, choose the position related to that)
        4. **Highest-ranking or most prominent** (if positions are equally emphasized, choose the most senior/significant role)
      * DO NOT prioritize based solely on duration - significance and emphasis matter more
-     * DO NOT list multiple positions - extract ONLY the position name itself (no "of [country]", "of [organization]", etc.)
+     * DO NOT list multiple positions - extract ONLY the position name itself
+     * PRESERVE full multi-word position titles (e.g., "Chief of Protocol", "Secretary of State", "Minister of Finance")
+     * REMOVE only extra organizational/country context (e.g., "Chief of Protocol of the United States" → "Chief of Protocol")
    - Example: If evidence shows a person being the first person to achieve something for a certain time period, region, gender, or that isn't normal, choose that OVER ONES that are not a significant achievement. 
 
 **5. Yes/No Questions (e.g., "Are X and Y the same?", "Did X do Y?")**

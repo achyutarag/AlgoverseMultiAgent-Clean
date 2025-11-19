@@ -1,2 +1,4 @@
 20251115_233006 - HotpotQA - 5 examples - EM: 0.8000, F1: 0.9000
 20251117_004637 - HotpotQA - 100 examples - EM: 0.5600, F1: 0.6900
+20251118_181040 - HotpotQA - 20 examples - EM: 0.7500, F1: 0.8151
+20251118_225732 - HotpotQA - 20 examples - EM: 0.6500, F1: 0.8012

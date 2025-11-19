@@ -162,10 +162,20 @@ Examples of good subquery generation:
             step_objective = step.get('objective', 'No objective')
             original_query = plan.get('main_question', 'Unknown query')
             
+            # Format previous answers for prompts
+            previous_answers_text = ""
+            if previous_answers:
+                previous_answers_text = "\n\n### Previous Steps and Answers (CRITICAL for multi-hop queries):"
+                for step_id_prev, answer in previous_answers.items():
+                    answer_str = str(answer)[:200] + "..." if len(str(answer)) > 200 else str(answer)
+                    previous_answers_text += f"\n- Step {step_id_prev}: {answer_str}"
+                previous_answers_text += "\n\nIMPORTANT: If this step depends on previous steps, you MUST use the specific entity names, values, or information from the answers above."
+            
             # First, get basic step info
             basic_prompt = f"""Step: {step_description}
 Objective: {step_objective}
 Original Query: {original_query}
+{previous_answers_text}
 
 Return a JSON object with basic info:
 {{
@@ -214,17 +224,34 @@ Return ONLY the JSON."""
                 sq_prompt = f"""Step: {step_description}
 Objective: {step_objective}
 Original Query: {original_query}
+{previous_answers_text}
 
 Previous sub-queries:
 {previous_sqs if previous_sqs else "None yet"}
 
+**IMPORTANT INSTRUCTIONS FOR MULTI-HOP QUERIES:**
+- If this step depends on previous steps, you should include the specific entity names, values, or information from previous answers in your sub-query when relevant
+- For example: If Step 1 found "John Smith" and Step 2 asks about John Smith's position, query "What position did John Smith hold?" rather than just "What position?"
+- When previous steps provide relevant entities (names, dates, locations, etc.), incorporate them into your sub-query to improve retrieval accuracy
+- Use the exact entity names, dates, locations, or other specific values from previous answers when they are directly relevant to the current step
+- However, if the current step is independent or doesn't need previous context, create a focused sub-query without forcing in previous information
+
 Generate sub-query {sq_num} to help accomplish this step. Return a JSON object:
 
-**Example**: For step "Find the nationality of Scott Derrickson", return:
+**Example 1 (Simple)**: For step "Find the nationality of Scott Derrickson", return:
 {{
     "id": "sq_{sq_num}",
     "query": "Scott Derrickson nationality American director",
     "purpose": "Find Scott Derrickson's nationality or country of origin",
+    "priority": {sq_num},
+    "context_needed": ["factual"]
+}}
+
+**Example 2 (Multi-hop)**: If Step 1 found "Jane Doe" and Step 2 is "Find her government position", return:
+{{
+    "id": "sq_{sq_num}",
+    "query": "Jane Doe government position held",
+    "purpose": "Find the government position held by Jane Doe",
     "priority": {sq_num},
     "context_needed": ["factual"]
 }}

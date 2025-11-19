@@ -325,7 +325,7 @@ async def main():
         "HotpotQA", 
         "hotpot_qa", 
         "distractor",
-        num_examples=100
+        num_examples=20
     )
     
     # Print summary
