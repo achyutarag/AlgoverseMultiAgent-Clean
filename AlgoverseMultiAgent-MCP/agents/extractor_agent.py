@@ -63,6 +63,18 @@ Guidelines for extraction:
 - Avoid redundant information - if multiple sources say the same thing, include the clearest version
 - Maintain source attribution for each extracted piece
 
+### ⚠️ CRITICAL: Contextual Interpretation and Matching
+- Use CONTEXTUAL CLUES from the documents to understand word meanings and match query terms to document terms
+- If the query uses a word that doesn't appear in documents, check for TYPOGRAPHICAL ERRORS or PHONETICALLY SIMILAR words
+- Examples: Query says "country" but document mentions "county" → still extract the passage (contextually matches)
+- Examples: Query says "principle" but document mentions "principal" → still extract if contextually relevant
+- Use the DOCUMENT CONTEXT to determine if query terms match document terms, even with spelling differences
+- DO NOT skip passages just because exact words don't match - FIRST check for contextual/phonetic similarity
+- If a word has multiple meanings, use the document context to determine which meaning is intended
+- Interpret ambiguous wording strictly according to how the documents use it, not how you think the term 'should' be used
+- Match query terms to document terms based on CONTEXTUAL FIT, not exact spelling
+- The document's context is the source of truth for interpretation
+
 Return a JSON object with this structure:
 {
     "query": "The original subquery",
@@ -227,6 +239,15 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
             - ⚠️ Extract specific sentences or spans that are relevant to the subquery (be inclusive, not restrictive)
             - ⚠️ Use relevance scores based on actual relevance - scores ≥ {min_relevance} are acceptable
             - ⚠️ Focus on context types: {', '.join(context_needed)}
+
+            ### ⚠️ CRITICAL: Contextual Interpretation and Matching
+            - Use CONTEXTUAL CLUES from documents to match query terms, even if spelling differs
+            - If query uses a word not in documents, check for TYPOGRAPHICAL ERRORS or PHONETICALLY SIMILAR words
+            - Examples: Query "country" → Document "county" → STILL EXTRACT (contextually matches)
+            - Examples: Query "principle" → Document "principal" → STILL EXTRACT if contextually relevant
+            - DO NOT skip passages just because exact words don't match - check for contextual/phonetic similarity FIRST
+            - Match query terms to document terms based on CONTEXTUAL FIT, not exact spelling
+            - Use document context to determine word meanings, not world knowledge
 
             ### ❌ WRONG - DO NOT DO THIS:
             {{

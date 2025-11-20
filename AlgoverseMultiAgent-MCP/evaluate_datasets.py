@@ -51,7 +51,10 @@ async def evaluate_dataset(dataset_name: str, dataset_name_full: str, dataset_co
     
     # Load dataset
     print(f"Loading {dataset_name} dataset...")
-    dataset = load_dataset(dataset_name_full, dataset_config)
+    if dataset_config is not None:
+        dataset = load_dataset(dataset_name_full, dataset_config)
+    else:
+        dataset = load_dataset(dataset_name_full)
     eval_dataset = dataset["validation"].select(range(num_examples))
     
     results = []
@@ -73,6 +76,8 @@ async def evaluate_dataset(dataset_name: str, dataset_name_full: str, dataset_co
             ground_truth = example["answer"]["value"] if example["answer"]["value"] else ""
         elif dataset_name == "HotpotQA":
             ground_truth = example["answer"]
+        elif dataset_name == "MuSiQue":
+            ground_truth = example.get("answer", "")
         else:
             ground_truth = example.get("answer", "")
         
@@ -83,9 +88,13 @@ async def evaluate_dataset(dataset_name: str, dataset_name_full: str, dataset_co
             # Load documents based on dataset type
             print("Loading documents for this example...")
             if dataset_name == "HotpotQA":
-                # HotpotQA has context documents in the example
+                # HotpotQA: Per-example documents (10 docs: 2 gold + 8 distractors)
                 from agents.hotpotqa_document_loader import load_hotpotqa_example_context_as_documents
                 documents = load_hotpotqa_example_context_as_documents(example)
+            elif dataset_name == "MuSiQue":
+                # MuSiQue: Per-example paragraphs (20-30 paragraphs, 2-4 are supporting facts)
+                from agents.musique_document_loader import load_musique_example_context_as_documents
+                documents = load_musique_example_context_as_documents(example)
             elif dataset_name == "TriviaQA":
                 # TriviaQA: Load a general corpus (TriviaQA doesn't have per-example context)
                 # You might need to load documents from a different source
@@ -328,12 +337,21 @@ async def main():
         num_examples=20
     )
     
+    # Evaluate MuSiQue
+    musique_results, musique_em, musique_f1, musique_avg_latency, musique_total_latency, musique_avg_tokens = await evaluate_dataset(
+        "MuSiQue", 
+        "allenai/musique", 
+        None,  # MuSiQue doesn't have configs like HotpotQA
+        num_examples=20
+    )
+    
     # Print summary
     print(f"\n{'='*60}")
     print("EVALUATION SUMMARY")
     print(f"{'='*60}")
     #print(f"TriviaQA - EM: {trivia_em:.4f}, F1: {trivia_f1:.4f}")
     print(f"HotpotQA - EM: {hotpot_em:.4f}, F1: {hotpot_f1:.4f}")
+    print(f"MuSiQue - EM: {musique_em:.4f}, F1: {musique_f1:.4f}")
     print(f"{'='*60}")
 
 if __name__ == "__main__":

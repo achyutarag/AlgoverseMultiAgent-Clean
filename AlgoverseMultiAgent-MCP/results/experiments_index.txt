@@ -2,3 +2,7 @@
 20251117_004637 - HotpotQA - 100 examples - EM: 0.5600, F1: 0.6900
 20251118_181040 - HotpotQA - 20 examples - EM: 0.7500, F1: 0.8151
 20251118_225732 - HotpotQA - 20 examples - EM: 0.6500, F1: 0.8012
+20251119_001714 - HotpotQA - 20 examples - EM: 0.7000, F1: 0.8524
+20251120_004035 - HotpotQA - 5 examples - EM: 0.8000, F1: 0.9143
+20251120_012903 - HotpotQA - 20 examples - EM: 0.7000, F1: 0.8381
+20251120_122300 - HotpotQA - 20 examples - EM: 0.7000, F1: 0.7857

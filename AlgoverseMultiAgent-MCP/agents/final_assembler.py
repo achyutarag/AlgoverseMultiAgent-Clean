@@ -332,13 +332,14 @@ class FinalAssembler:
     
     async def _synthesize_multihop_answer(self, query: str, step_answers: List[Dict[str, Any]]) -> str:
         """Synthesize answer for multi-hop questions."""
-        synthesis = f"Based on the step-by-step analysis:\n\n"
+        if not step_answers:
+            return "No information found to answer your question."
         
-        for i, step_answer in enumerate(step_answers, 1):
-            synthesis += f"Step {i}: {step_answer['answer']}\n\n"
+        # For multi-hop, use the final step answer and extract concise version
+        final_answer = step_answers[-1]["answer"]
+        final_answer = self._extract_concise_answer(query, final_answer)
         
-        synthesis += "This multi-step reasoning provides a comprehensive answer to your question."
-        return synthesis
+        return final_answer
     
     async def _synthesize_analytical_answer(self, query: str, step_answers: List[Dict[str, Any]]) -> str:
         """Synthesize answer for analytical questions."""
@@ -418,6 +419,27 @@ class FinalAssembler:
             yes_no_match = re.search(r'\b(yes|no)\b', answer_lower)
             if yes_no_match:
                 return yes_no_match.group(1).capitalize()
+        
+        # Position/Title questions (What position, what role, what title) - handle multi-word titles with connecting words
+        if any(keyword in query_lower for keyword in [
+            "what position", "what role", "what title", "held what position", 
+            "served as", "position did", "role did", "title did", "government position"
+        ]):
+            # Pattern for multi-word titles with connecting words (e.g., "Chief of Protocol", "Secretary of State")
+            # Allow lowercase connecting words: of, the, and, for, in, at, to, from, etc.
+            title_match = re.search(r'\b([A-Z][a-z]+(?:\s+(?:of|the|and|for|in|at|to|from)\s+[A-Z][a-z]+)+)\b', answer)
+            if title_match:
+                title = title_match.group(1)
+                # Limit to reasonable length (e.g., max 6 words for titles)
+                if len(title.split()) <= 6:
+                    return title
+            
+            # Fallback: extract first capitalized phrase (handles simple titles without connecting words)
+            simple_title = re.search(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', answer)
+            if simple_title:
+                title = simple_title.group(1)
+                if len(title.split()) <= 5:
+                    return title
         
         # Entity name questions (Who, What is the name of, formed by, created by, etc.)
         if any(keyword in query_lower for keyword in [

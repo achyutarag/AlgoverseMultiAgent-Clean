@@ -53,19 +53,19 @@ class QAAgent(BaseAgent):
         self.max_tokens = max(100, min(4096, max_tokens))
         self.conversation_history: List[Dict[str, str]] = []
         
-        self.system_prompt = """You are an expert at answering questions using provided evidence. 
+        self.system_prompt = """You are an extractive question-answering system. Your task is to extract answers directly from provided evidence.
 
 Your task is to:
-1. Answer the question using ONLY the provided evidence
-2. Be concise and accurate
-3. Provide confidence scores based on evidence quality
-4. Return valid JSON
+1. Extract the answer EXACTLY as it appears in the evidence
+2. Do NOT explain, paraphrase, or modify the wording
+3. Do NOT infer anything not explicitly in the evidence
+4. If the answer is not directly present, return "unknown"
+5. Return valid JSON
 
 Return a JSON object with this structure:
 {
-    "answer": "Your answer to the question",
+    "answer": "Extracted answer from evidence",
     "confidence": 0.95,
-    "reasoning": "Why you gave this answer",
     "sources": ["source1", "source2"],
     "supporting_evidence": [
         {
@@ -274,22 +274,32 @@ You are performing a FACTUAL LOOKUP operation. Your task is to:
             # Add general instruction for using evidence as-provided
             prompt += "\n\n### ⚠️ IMPORTANT: Using Evidence As-Provided"
             prompt += "\n- Extract answers DIRECTLY from the evidence provided above"
-            prompt += "\n- DO NOT reject or modify answers based on the year or date of the data"
-            prompt += "\n- Use the information as it appears in the evidence, regardless of when it's from"
+            prompt += "\n- DO NOT reject or modify answers based on the year, date, or whether they match your world knowledge"
+            prompt += "\n- Use the information as it appears in the evidence, regardless of when it's from or whether it seems 'correct'"
             prompt += "\n- If multiple pieces of evidence exist, use the one that most directly answers the question"
-            prompt += "\n- Your job is to extract the answer from the evidence, not to judge its recency or accuracy"
+            prompt += "\n- Your job is to extract the answer from the evidence, not to judge its recency, accuracy, or plausibility"
+            prompt += "\n- Trust the evidence's context over your general knowledge - the evidence is the source of truth"
             
-            # Add instructions for synthesis
+            
+            # Add instructions for extraction
             prompt += f"""
 
-### Instructions:
-Please synthesize a CONCISE, DIRECT answer to the subquery using the evidence above.
+### EXTRACTION INSTRUCTIONS:
+Using the question and evidence provided above:
+
+Extract the final answer as a short phrase copied EXACTLY from the evidence.
+- Do NOT explain your answer
+- Do NOT paraphrase
+- Do NOT modify wording
+- Do NOT infer anything not explicitly in the evidence
+- If the answer is not directly present in the evidence, output "unknown"
+- ONLY return "unknown" if, AFTER checking for typos, misspellings, and contextual matches, the answer is still not present in the evidence
+
 Your response MUST be a valid JSON object with this exact structure:
 {{
     "question": "The original subquery",
-    "answer": "Your DIRECT answer - be concise and specific (typically 1-5 words for factual questions, just 'Yes' or 'No' for yes/no questions)",
+    "answer": "Extracted answer - copy exactly from evidence (typically 1-5 words, just 'Yes' or 'No' for yes/no questions)",
     "confidence": 0.0-1.0,
-    "reasoning": "Your step-by-step reasoning process",
     "sources": ["doc1_id", "doc2_id"],
     "supporting_evidence": [
         {{
@@ -317,12 +327,12 @@ Your response MUST be a valid JSON object with this exact structure:
    - If evidence specifies a unit (e.g., "seated", "people", "cars"), use that exact unit
 
 **3. Location Questions (e.g., "in what [city]?", "located in what [city]?")**
-   - Rule: Return format "[neighborhood], [city]" when question asks for location within a city
-   - ❌ WRONG: "[neighborhood]" (missing city)
-   - ✅ CORRECT: "[neighborhood], [city]" (complete location)
-   - Example: Question "in what [city]?" → Answer: "[neighborhood], [city]" (not just "[neighborhood]")
-   - Example: Question "located in what city?" → Answer: "Downtown District, Chicago" (not just "Downtown District")
-   - If question asks for a neighborhood within a specific city, include both neighborhood and city
+   - Rule: Extract the location information that directly answers the question
+   - If the question asks for a location within a city, include both neighborhood and city if both are mentioned in evidence
+   - If the question asks for just a city, extract only the city name
+   - Extract the format that appears in the evidence (e.g., "Midtown, New York" or "New York" depending on what the question asks for)
+   - ❌ WRONG: Adding location details not present in evidence
+   - ✅ CORRECT: Extract exactly what the question asks for, using the format from evidence
 
 **4. Specific Positions/Titles (e.g., "What position did X hold?", "What was X's role?")**
    - Rule: Extract ONLY ONE position - the most significant/relevant one if multiple exist
@@ -333,15 +343,13 @@ Your response MUST be a valid JSON object with this exact structure:
    - ❌ WRONG: "Chief" (truncated - missing "of Protocol" which is part of the position name)
    - Rule: If the question asks for "a position" or "the position" (singular) but evidence shows multiple positions:
      * Extract ONLY ONE position based on the evidence, prioritizing in this order:
-       1. **Historical significance** (first person to hold it, barrier-breaking, notable achievement)
+       1. **Most directly relevant to question context** (if question mentions specific time period, event, or achievement, choose the position related to that)
        2. **Most emphasized in evidence** (repeatedly mentioned, highlighted, most detailed description)
-       3. **Most directly relevant to question context** (if question mentions specific time period, event, or achievement, choose the position related to that)
-       4. **Highest-ranking or most prominent** (if positions are equally emphasized, choose the most senior/significant role)
-     * DO NOT prioritize based solely on duration - significance and emphasis matter more
+       3. **Highest-ranking or most prominent** (if positions are equally emphasized, choose the most senior/significant role)
+     * DO NOT prioritize based solely on duration unless the question specifically asks about duration
      * DO NOT list multiple positions - extract ONLY the position name itself
-     * PRESERVE full multi-word position titles (e.g., "Chief of Protocol", "Secretary of State", "Minister of Finance")
-     * REMOVE only extra organizational/country context (e.g., "Chief of Protocol of the United States" → "Chief of Protocol")
-   - Example: If evidence shows a person being the first person to achieve something for a certain time period, region, gender, or that isn't normal, choose that OVER ONES that are not a significant achievement. 
+     * PRESERVE full multi-word position titles (e.g., "Secretary of State", "Minister of Finance")
+     * REMOVE only extra organizational/country context (e.g., "Secretary of State of the United States" → "Secretary of State") 
 
 **5. Yes/No Questions (e.g., "Are X and Y the same?", "Did X do Y?")**
    - Rule: Answer with ONLY "Yes" or "No" - nothing else
@@ -353,25 +361,24 @@ Your response MUST be a valid JSON object with this exact structure:
    - ✅ CORRECT: "[nationality]" (just the attribute)
 
 **7. Time Period Questions (e.g., "during what years?", "served during what timeframe?")**
-   - Rule: Extract the time period with connecting words if present in evidence
-   - ❌ WRONG: "1450-1494" (missing connector)
-   - ✅ CORRECT: "1450 until 1494" or "1450-1494" (preserve format from evidence using connector)
+   - Rule: Extract the time period exactly as it appears in the evidence
+   - Preserve the format from evidence (e.g., "1990-2000", "from 1990 to 2000", "1990 until 2000")
+   - ✅ CORRECT: Use the exact format from evidence, including any connecting words if present
+   - ❌ WRONG: Changing the format or adding connectors not present in evidence
 
 ### Guidelines:
 1. **BE CONCISE**: Answer the subquery directly - typically 1-5 words, rarely more than 1 sentence
 2. **BE SPECIFIC**: Extract ONLY the exact answer requested - nothing else
 3. **DO NOT** include descriptions, explanations, or multiple facts
 4. **DO NOT** list multiple positions/entities - extract ONLY the one asked for
-5. **DO NOT** provide reasoning in the answer field - put it in "reasoning" field
-6. **DO NOT** include venue names, organization names, or other context unless the question specifically asks for it
-7. If the question asks for one thing, provide ONLY that thing
-8. Rate your confidence honestly based on evidence quality
+5. **DO NOT** include venue names, organization names, or other context unless the question specifically asks for it
+6. If the question asks for one thing, provide ONLY that thing
+7. Rate your confidence honestly based on evidence quality
 
 **HANDLING AMBIGUOUS QUESTIONS**: If the question asks for one thing but evidence contains multiple valid answers:
    - Choose the answer that is most prominently featured in the evidence, prioritizing in this order:
-     * **Historical significance** (first, notable, barrier-breaking, landmark achievement)
-     * **Most emphasized** (repeatedly mentioned, highlighted, most detailed description)
      * **Most directly relevant** (directly answers the question's specific context or intent)
+     * **Most emphasized** (repeatedly mentioned, highlighted, most detailed description)
      * **Most detailed** (has more description, context, or information in the evidence)
      * **Mentioned first or most prominently** (appears early or is emphasized in the evidence)
    - DO NOT prioritize based solely on duration or time period unless the question specifically asks about duration
