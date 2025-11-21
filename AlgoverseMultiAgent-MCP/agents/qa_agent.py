@@ -79,61 +79,6 @@ Return a JSON object with this structure:
 **IMPORTANT**: Always return valid JSON. Do not include any text before or after the JSON object."""
 
 
-    def _get_operator_instructions(self, operator: str, metadata_vector) -> str:
-        """
-        Get operator-specific instructions based on metadata vector.
-        
-        Args:
-            operator: Reasoning operator (compare, infer, join, lookup)
-            metadata_vector: MetadataVector instance or None
-            
-        Returns:
-            String with operator-specific instructions
-        """
-        if operator == "compare":
-            return """
-### REASONING OPERATOR: COMPARISON
-You are performing a COMPARISON operation. Your task is to:
-- Compare two or more entities, concepts, or items
-- Highlight similarities and differences
-- Structure your answer as a comparison (e.g., "X is... while Y is...")
-- Use comparative language: "more than", "less than", "similar to", "different from"
-- Format: Present both sides of the comparison clearly
-"""
-        
-        elif operator == "infer":
-            return """
-### REASONING OPERATOR: INFERENCE
-You are performing an INFERENCE operation. Your task is to:
-- Draw logical conclusions from the evidence
-- Identify cause-effect relationships
-- Explain "why" or "how" something happened
-- Use inferential language: "because", "therefore", "as a result", "led to"
-- Format: Present the reasoning chain clearly
-"""
-        
-        elif operator == "join":
-            return """
-### REASONING OPERATOR: JOIN/TEMPORAL
-You are performing a JOIN operation (often temporal). Your task is to:
-- Connect information from multiple sources or time points
-- Establish temporal relationships (before, after, sequence)
-- Combine related facts into a coherent narrative
-- Use temporal language: "first", "then", "after", "before", "subsequently"
-- Format: Present information in logical or chronological order
-"""
-        
-        else:  # lookup (default)
-            return """
-### REASONING OPERATOR: LOOKUP/FACTUAL
-You are performing a FACTUAL LOOKUP operation. Your task is to:
-- Extract specific factual information from evidence
-- Provide direct, concise answers
-- Focus on accuracy and precision
-- Format: Direct answer format (no comparison or inference needed)
-"""
-
-
     async def process(self, input_data: Dict[str, Any]) -> AgentResponse:
         """
         Generate a step-specific answer using in-context learning with provided evidence.
@@ -223,12 +168,7 @@ You are performing a FACTUAL LOOKUP operation. Your task is to:
         
         try:
             # Prepare the enhanced prompt with step-specific context (preprocess for LLM)
-            # NEW: Get operator-specific instructions
-            operator_instructions = self._get_operator_instructions(reasoning_operator, metadata_vector)
-            
             prompt = f"""{self.system_prompt}
-            
-{operator_instructions}
             
 ### Subquery to Answer:
 {tokenization_utils.preprocess_llm_input(question)}
@@ -271,6 +211,7 @@ You are performing a FACTUAL LOOKUP operation. Your task is to:
                     f"Reasoning: {reasoning}\n"
                 )
             
+            
             # Add general instruction for using evidence as-provided
             prompt += "\n\n### ⚠️ IMPORTANT: Using Evidence As-Provided"
             prompt += "\n- Extract answers DIRECTLY from the evidence provided above"
@@ -279,6 +220,10 @@ You are performing a FACTUAL LOOKUP operation. Your task is to:
             prompt += "\n- If multiple pieces of evidence exist, use the one that most directly answers the question"
             prompt += "\n- Your job is to extract the answer from the evidence, not to judge its recency, accuracy, or plausibility"
             prompt += "\n- Trust the evidence's context over your general knowledge - the evidence is the source of truth"
+            prompt += "\n\n### ⚠️ CRITICAL: Trust Extractor's Contextual Matching"
+            prompt += "\n- The evidence provided above has ALREADY been contextually matched by the Extractor Agent"
+            prompt += "\n- DO NOT return 'unknown' just because words don't exactly match - the Extractor already handled contextual matching"
+            prompt += "\n- Extract the answer following the Answer Format Rules below"
             
             
             # Add instructions for extraction

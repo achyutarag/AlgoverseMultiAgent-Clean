@@ -353,7 +353,8 @@ class MARAGOrchestrator:
                 "step": step,
                 "plan": plan,
                 "history": history,
-                "previous_answers": previous_answers
+                "previous_answers": previous_answers,
+                "relational_type": metadata_vector.relational_type if metadata_vector else "factual"
             }
             
             step_definer_response = await self.step_definer.process(step_definer_input)

@@ -106,6 +106,7 @@ Examples of good subquery generation:
         history = input_data.get('history', [])
         context = input_data.get('context', {})
         previous_answers = input_data.get('previous_answers', {})
+        relational_type = input_data.get('relational_type', 'factual')  # Get relational type for guidance
         max_subqueries = min(input_data.get('max_subqueries', self.max_subqueries), 5)  # Cap at 5
         
         if not step or 'id' not in step:
@@ -189,7 +190,7 @@ Return ONLY the JSON."""
             # Generate basic step info with token tracking
             basic_response_text, basic_token_usage = await self.generate_text_with_usage(
                 basic_prompt,
-                temperature=0.3,
+                temperature=0.2,
                 max_new_tokens=512
             )
             total_token_usage = {
@@ -221,6 +222,33 @@ Return ONLY the JSON."""
                 sq_num = i + 1
                 previous_sqs = "\n".join([f"Sub-query {j+1}: {sq['query']}" for j, sq in enumerate(sub_queries)])
                 
+                # Add relational type-specific guidance
+                relational_guidance = ""
+                if relational_type == "compare":
+                    relational_guidance = """
+**RELATIONAL TYPE: COMPARISON**
+- This step involves comparing entities to identify which matches criteria
+- Generate subqueries that help IDENTIFY which entity matches, NOT extract attributes
+- For "Which X... or Y?" questions: Generate subqueries like "What is [attribute] of X?" and "What is [attribute] of Y?" to identify the matching entity
+- ❌ WRONG: "Compare the nationality of X and Y" (extracts attribute, changes question structure)
+- ✅ CORRECT: "What is the nationality of X?" and "What is the nationality of Y?" (helps identify which entity matches)
+- The goal is ENTITY MATCHING, not attribute extraction
+"""
+                elif relational_type == "temporal" or relational_type == "join":
+                    relational_guidance = """
+**RELATIONAL TYPE: TEMPORAL/JOIN**
+- This step involves connecting information across time points or sources
+- Generate subqueries that establish temporal relationships (before, after, sequence)
+- Focus on time-based connections: "when did X happen?", "what happened before Y?", "what is the sequence?"
+"""
+                elif relational_type == "infer" or relational_type == "cause-effect":
+                    relational_guidance = """
+**RELATIONAL TYPE: INFERENCE/CAUSE-EFFECT**
+- This step involves drawing conclusions or identifying cause-effect relationships
+- Generate subqueries that help establish logical connections
+- Focus on relationships: "why did X happen?", "what caused Y?", "what was the result of Z?"
+"""
+                
                 sq_prompt = f"""Step: {step_description}
 Objective: {step_objective}
 Original Query: {original_query}
@@ -235,6 +263,14 @@ Previous sub-queries:
 - When previous steps provide relevant entities (names, dates, locations, etc.), incorporate them into your sub-query to improve retrieval accuracy
 - Use the exact entity names, dates, locations, or other specific values from previous answers when they are directly relevant to the current step
 - However, if the current step is independent or doesn't need previous context, create a focused sub-query without forcing in previous information
+
+**CRITICAL: Preserve Question Structure (Entity Matching vs Attribute Extraction)**
+- If the original question asks for an ENTITY NAME (e.g., "Which X... or Y?", "Who...?", "What is the name of...?"), generate subqueries that help IDENTIFY the entity, not extract attributes
+- If the original question asks for an ATTRIBUTE (e.g., "What is the nationality of X?", "How many...?"), generate subqueries that extract the attribute
+- ❌ WRONG: Question asks "Which writer was from England, X or Y?" → Subquery "Compare the nationality of X and Y" (extracts attribute, changes question structure)
+- ✅ CORRECT: Question asks "Which writer was from England, X or Y?" → Subqueries "What is the nationality of X?" and "What is the nationality of Y?" (helps identify which entity matches)
+- Preserve the original question's intent: entity selection vs attribute extraction
+{relational_guidance}
 
 Generate sub-query {sq_num} to help accomplish this step. Return a JSON object:
 

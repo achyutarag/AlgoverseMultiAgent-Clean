@@ -6,3 +6,5 @@
 20251120_004035 - HotpotQA - 5 examples - EM: 0.8000, F1: 0.9143
 20251120_012903 - HotpotQA - 20 examples - EM: 0.7000, F1: 0.8381
 20251120_122300 - HotpotQA - 20 examples - EM: 0.7000, F1: 0.7857
+20251120_170538 - HotpotQA - 20 examples - EM: 0.8000, F1: 0.8667
+20251120_185020 - HotpotQA - 20 examples - EM: 0.7500, F1: 0.8262
