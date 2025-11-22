@@ -243,15 +243,12 @@ class MARAGOrchestrator:
             logger.error(f"Planner execution failed: {str(e)}")
             raise Exception(f"Failed to generate plan: {str(e)}")
     
+    
+
     async def _execute_plan_steps(self, plan: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Execute all steps in the plan following MA-RAG methodology.
-        
-        Args:
-            plan: The generated plan with steps
-            
-        Returns:
-            List of step results
+        Includes early stopping if answer is found.
         """
         steps = plan.get("steps", [])
         if not steps:
@@ -264,6 +261,7 @@ class MARAGOrchestrator:
         ordered_steps = await self.state_manager.resolve_step_dependencies(steps)
         
         step_results = []
+        main_question = plan.get("main_question", "")
         
         for i, step in enumerate(ordered_steps):
             try:
@@ -285,6 +283,20 @@ class MARAGOrchestrator:
                 
                 logger.info(f"Step {step['id']} completed successfully")
                 
+                # EARLY STOPPING: Check if answer is sufficient
+                # Extract answer from qa_result
+                qa_result = step_result.get("qa_result", {})
+                answer = qa_result.get("answer", "")
+                
+                # Check if answer exists and semantically aligns with main question
+                # (confidence is step-local for subquery, not global for main question, so we rely on semantic alignment)
+                if answer:
+                    # Semantic alignment check: Does this answer match what the main question asks for?
+                    if self._is_answer_sufficient(answer, main_question, step_result):
+                        logger.info(f"✅ Answer found in step {i+1}: '{answer}'")
+                        logger.info(f"Stopping early - skipping remaining {len(ordered_steps) - i - 1} steps")
+                        break  # Stop executing remaining steps
+                
             except Exception as e:
                 logger.error(f"Step {step.get('id', 'unknown')} failed: {str(e)}")
                 
@@ -302,6 +314,179 @@ class MARAGOrchestrator:
         
         logger.info(f"Completed {len(step_results)} steps")
         return step_results
+
+    def _is_answer_sufficient(self, answer: str, main_question: str, step_result: Dict) -> bool:
+        """
+        Check if the current answer is sufficient to answer the main question.
+        Uses semantic alignment to verify answer type matches question type.
+        
+        Args:
+            answer: The answer from current step
+            main_question: The original question
+            step_result: Full step result with context
+            
+        Returns:
+            True if answer is sufficient, False otherwise
+        """
+        if not answer or answer.lower() in ["unknown", "not found", "no information"]:
+            return False
+        
+        # Check if answer is a valid entity/name (not a placeholder)
+        if len(answer) < 2:  # Too short to be meaningful
+            return False
+        
+        question_lower = main_question.lower()
+        answer_lower = answer.lower()
+        
+        # Classify question type based on semantic patterns
+        question_type = self._classify_question_type(main_question)
+        answer_type = self._classify_answer_type(answer, main_question)
+        
+        # Check semantic alignment: answer type must match question type
+        if not self._check_semantic_alignment(question_type, answer_type, main_question, answer):
+            return False
+        
+        # Additional validation: for entity selection questions, answer should be one of the mentioned entities
+        if question_type == "entity_selection":
+            # Check if answer matches one of the entities in the question
+            if not self._answer_matches_question_entities(answer, main_question):
+                return False
+        
+        return True
+    
+    def _classify_question_type(self, question: str) -> str:
+        """Classify what type of answer the question is asking for."""
+        question_lower = question.lower()
+        
+        # Entity name questions
+        if any(phrase in question_lower for phrase in [
+            "which", "who", "what is the name", "what administrative", 
+            "what person", "what organization", "what place"
+        ]):
+            # Check if it's entity selection (which X or Y)
+            if " or " in question_lower or " vs " in question_lower:
+                return "entity_selection"
+            return "entity_name"
+        
+        # Attribute questions
+        if any(phrase in question_lower for phrase in [
+            "what is the", "what was the", "how many", "how much",
+            "what nationality", "what country", "what year", "when",
+            "where was", "where did"
+        ]):
+            return "attribute"
+        
+        # Location questions
+        if any(phrase in question_lower for phrase in [
+            "where is", "where are", "where was", "where did", "located"
+        ]):
+            return "location"
+        
+        # Default: assume entity or attribute
+        return "unknown"
+    
+    def _classify_answer_type(self, answer: str, question: str) -> str:
+        """Classify the type of answer provided."""
+        answer_lower = answer.lower()
+        question_lower = question.lower()
+        
+        # Check if answer looks like an entity name (proper noun, capitalized)
+        if answer[0].isupper() and len(answer.split()) <= 5:
+            # Check if it's a location (common location indicators)
+            if any(indicator in answer_lower for indicator in ["city", "state", "county", "country", "province"]):
+                return "location"
+            # Check if it's an attribute value (nationality, date, etc.)
+            if any(attr in question_lower for attr in ["nationality", "country of origin", "born in"]):
+                # If answer is a nationality/attribute, not an entity name
+                if any(nationality in answer_lower for nationality in [
+                    "american", "british", "english", "french", "german", "spanish",
+                    "born", "native"
+                ]):
+                    return "attribute"
+            return "entity_name"
+        
+        # Check if answer is a number/quantity
+        if answer.replace(",", "").replace(".", "").isdigit():
+            return "attribute"
+        
+        # Check if answer is a date/year
+        if any(year in answer for year in ["19", "20"]) and len(answer) <= 10:
+            return "attribute"
+        
+        # Check if answer is a location indicator
+        if any(indicator in answer_lower for indicator in [
+            "city", "state", "county", "country", "province", "region"
+        ]):
+            return "location"
+        
+        # Default: assume attribute or entity
+        return "unknown"
+    
+    def _check_semantic_alignment(self, question_type: str, answer_type: str, question: str, answer: str) -> bool:
+        """Check if answer type semantically aligns with question type."""
+        # Direct matches
+        if question_type == answer_type:
+            return True
+        
+        # Compatible matches
+        if question_type == "entity_name" and answer_type == "entity_name":
+            return True
+        
+        if question_type == "entity_selection" and answer_type == "entity_name":
+            return True
+        
+        if question_type == "location" and answer_type == "location":
+            return True
+        
+        if question_type == "attribute" and answer_type == "attribute":
+            return True
+        
+        # Mismatches: question asks for entity but got attribute (or vice versa)
+        if question_type == "entity_name" and answer_type == "attribute":
+            return False
+        
+        if question_type == "entity_selection" and answer_type == "attribute":
+            return False
+        
+        if question_type == "attribute" and answer_type == "entity_name":
+            # Sometimes entity names can be answers to attribute questions
+            # But if question explicitly asks for attribute, entity is wrong
+            question_lower = question.lower()
+            if any(attr in question_lower for attr in ["nationality", "country of origin", "born"]):
+                return False  # Question asks for nationality, got entity name
+        
+        # Unknown types: be conservative, allow it
+        if question_type == "unknown" or answer_type == "unknown":
+            return True
+        
+        return False
+    
+    def _answer_matches_question_entities(self, answer: str, question: str) -> bool:
+        """Check if answer matches one of the entities mentioned in the question."""
+        # Extract entities from question (capitalized words, proper nouns)
+        import re
+        # Find capitalized words/phrases (likely entities)
+        entities = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', question)
+        
+        # Check if answer matches any entity (case-insensitive, partial match)
+        answer_lower = answer.lower()
+        for entity in entities:
+            if entity.lower() in answer_lower or answer_lower in entity.lower():
+                return True
+        
+        # Also check for "X or Y" pattern
+        if " or " in question.lower():
+            parts = question.lower().split(" or ")
+            for part in parts:
+                # Extract entity from part
+                entity_match = re.search(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', part)
+                if entity_match:
+                    entity = entity_match.group(1)
+                    if entity.lower() in answer_lower or answer_lower in entity.lower():
+                        return True
+        
+        # If we can't find entities, be lenient (return True)
+        return True
     
     async def _execute_single_step(self, step: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -353,8 +538,7 @@ class MARAGOrchestrator:
                 "step": step,
                 "plan": plan,
                 "history": history,
-                "previous_answers": previous_answers,
-                "relational_type": metadata_vector.relational_type if metadata_vector else "factual"
+                "previous_answers": previous_answers
             }
             
             step_definer_response = await self.step_definer.process(step_definer_input)

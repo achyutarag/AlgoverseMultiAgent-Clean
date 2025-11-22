@@ -8,3 +8,7 @@
 20251120_122300 - HotpotQA - 20 examples - EM: 0.7000, F1: 0.7857
 20251120_170538 - HotpotQA - 20 examples - EM: 0.8000, F1: 0.8667
 20251120_185020 - HotpotQA - 20 examples - EM: 0.7500, F1: 0.8262
+20251120_230234 - HotpotQA - 20 examples - EM: 0.7000, F1: 0.7333
+20251121_002619 - HotpotQA - 20 examples - EM: 0.7000, F1: 0.8095
+20251121_010140 - HotpotQA - 20 examples - EM: 0.8000, F1: 0.8333
+20251121_162651 - MuSiQue - 20 examples - EM: 0.0000, F1: 0.0000

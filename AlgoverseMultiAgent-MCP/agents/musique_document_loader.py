@@ -14,6 +14,10 @@ MuSiQue Structure:
 from typing import List, Dict, Any
 from langchain.schema import Document
 from datasets import load_dataset
+import json
+import os
+import requests
+from pathlib import Path
 
 
 def load_musique_example_context_as_documents(
@@ -38,24 +42,48 @@ def load_musique_example_context_as_documents(
     """
     documents = []
     
-    # MuSiQue has 'paragraphs' field (list of paragraph texts)
+    # MuSiQue has 'paragraphs' field (list of paragraph dictionaries or strings)
     paragraphs = example.get('paragraphs', [])
     
     # Supporting facts indicate which paragraphs are needed
     supporting_facts = example.get('supporting_facts', [])
     
     # Create a document for each paragraph
-    for para_idx, paragraph_text in enumerate(paragraphs):
+    for para_idx, paragraph_item in enumerate(paragraphs):
+        # Handle both string and dict formats
+        if isinstance(paragraph_item, dict):
+            # MuSiQue paragraphs are dictionaries with keys like 'idx', 'title', 'text', etc.
+            # Extract the text content - try common field names
+            paragraph_text = paragraph_item.get('text', 
+                          paragraph_item.get('content', 
+                          paragraph_item.get('paragraph',
+                          paragraph_item.get('title', str(paragraph_item)))))
+            
+            # Get paragraph index from dict if available, otherwise use enumerate index
+            para_idx_from_dict = paragraph_item.get('idx', para_idx)
+            
+            # Get supporting fact status from dict if available
+            is_supporting_from_dict = paragraph_item.get('is_supporting', False)
+        else:
+            # If it's already a string, use it directly
+            paragraph_text = str(paragraph_item)
+            para_idx_from_dict = para_idx
+            is_supporting_from_dict = False
+        
         # Create metadata
         metadata = {
             "source": "musique",
-            "paragraph_id": para_idx,
+            "paragraph_id": para_idx_from_dict,
             "example_id": example.get('id', 'unknown')
         }
         
         if include_metadata:
             # Check if this paragraph is a supporting fact
-            is_supporting = para_idx in supporting_facts if isinstance(supporting_facts, list) else False
+            # Use dict value if available, otherwise check the supporting_facts list
+            if isinstance(paragraph_item, dict) and 'is_supporting' in paragraph_item:
+                is_supporting = is_supporting_from_dict
+            else:
+                is_supporting = para_idx_from_dict in supporting_facts if isinstance(supporting_facts, list) else False
             
             metadata.update({
                 "is_supporting_fact": is_supporting,
@@ -67,13 +95,83 @@ def load_musique_example_context_as_documents(
         
         # Create Document object
         doc = Document(
-            page_content=paragraph_text,
+            page_content=paragraph_text,  # Now guaranteed to be a string
             metadata=metadata
         )
         documents.append(doc)
     
     return documents
 
+def _load_musique_from_github(dataset_split: str = "validation") -> List[Dict[str, Any]]:
+    """
+    Load MuSiQue dataset from local JSONL files.
+    
+    Args:
+        dataset_split: Which split to load ('train' or 'validation')
+        
+    Returns:
+        List of examples from the dataset
+    """
+    import os
+    import json
+    
+    # Map split names to file names
+    split_files = {
+        "train": "musique_ans_v1.0_train.jsonl",
+        "validation": "musique_ans_v1.0_dev.jsonl",
+        "dev": "musique_ans_v1.0_dev.jsonl"
+    }
+    
+    filename = split_files.get(dataset_split, split_files["validation"])
+    
+    # Check for local JSONL file in multiple locations
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(current_dir)  # Go up from agents/ to project root
+    cwd = os.getcwd()  # Current working directory
+    
+    
+    possible_paths = [
+        os.path.join(project_root, "musique_data_v1.0", "data", filename),  # In musique_data_v1.0/data/
+        os.path.join(project_root, "data", filename),  # In project_root/data/
+        os.path.join(cwd, "musique_data_v1.0", "data", filename),  # In cwd/musique_data_v1.0/data/
+        os.path.join(cwd, "data", filename),  # In cwd/data/
+        os.path.join(project_root, filename),  # In project root
+        os.path.join(cwd, filename),  # In current directory
+        os.path.join(current_dir, "..", "data", filename),  # Parent/data/
+    ]
+    
+    print(f"Looking for {filename} in:")
+    jsonl_path = None
+    for path in possible_paths:
+        abs_path = os.path.abspath(path)
+        exists = os.path.exists(abs_path)
+        print(f"  - {abs_path} {'✅ EXISTS' if exists else '❌ NOT FOUND'}")
+        if exists and jsonl_path is None:
+            jsonl_path = abs_path
+    
+    if not jsonl_path:
+        raise FileNotFoundError(
+            f"Could not find {filename} in any of these locations:\n" +
+            "\n".join(f"  - {os.path.abspath(p)}" for p in possible_paths) +
+            f"\n\nPlease extract musique_v1.0.zip and place the 'data' folder in the project directory."
+        )
+    
+    print(f"\n✅ Found file: {jsonl_path}")
+    print(f"Loading examples from {jsonl_path}...")
+    
+    # Read and parse JSONL file
+    examples = []
+    with open(jsonl_path, 'r', encoding='utf-8') as f:
+        for line_num, line in enumerate(f, 1):
+            if line.strip():
+                try:
+                    examples.append(json.loads(line))
+                except json.JSONDecodeError as e:
+                    print(f"Warning: Skipping invalid JSON on line {line_num}: {e}")
+                    continue
+    
+    print(f"✅ Successfully loaded {len(examples)} examples")
+    return examples
 
 def load_musique_context_as_documents(
     dataset_split: str = "train", 
@@ -82,6 +180,8 @@ def load_musique_context_as_documents(
 ) -> List[Document]:
     """
     Load MuSiQue dataset and convert context paragraphs into Document objects for retrieval.
+    
+    Tries to load from HuggingFace first, falls back to GitHub if needed.
     
     Args:
         dataset_split: Which split to load ('train' or 'validation')
@@ -92,11 +192,36 @@ def load_musique_context_as_documents(
         List of Document objects ready for the retriever agent
     """
     print(f"Loading MuSiQue {dataset_split} split...")
-    # MuSiQue is typically available on HuggingFace as "allenai/musique"
-    dataset = load_dataset("allenai/musique")
     
-    # Get the specified split
-    split_data = dataset[dataset_split]
+    # Try HuggingFace first
+    dataset = None
+    split_data = None
+    
+    try:
+        print("Attempting to load from HuggingFace: allenai/musique-v1")
+        dataset = load_dataset("allenai/musique-v1")
+        split_data = dataset[dataset_split]
+        print(f"✅ Successfully loaded from HuggingFace")
+    except Exception as e:
+        print(f"❌ Failed to load from HuggingFace: {e}")
+        print("Attempting to load from GitHub repository...")
+        
+        # Fallback to GitHub
+        examples = _load_musique_from_github(dataset_split)
+        
+        # Convert to dataset-like format
+        # Create a simple list that can be indexed like a dataset
+        class SimpleDataset:
+            def __init__(self, data):
+                self.data = data
+            def __getitem__(self, idx):
+                return self.data[idx]
+            def __len__(self):
+                return len(self.data)
+            def select(self, indices):
+                return SimpleDataset([self.data[i] for i in indices])
+        
+        split_data = SimpleDataset(examples)
     
     # Limit number of examples for memory management
     if num_examples > 0:
@@ -194,7 +319,7 @@ if __name__ == "__main__":
     print("Testing MuSiQue document loader...")
     
     # Load a small sample
-    dataset = load_dataset("allenai/musique")
+    dataset = load_dataset("allenai/musique-v1")
     sample_example = dataset["validation"][0]
     
     docs = load_musique_example_context_as_documents(sample_example)

@@ -1,4 +1,5 @@
 import asyncio
+import argparse
 import csv
 import json
 import logging
@@ -51,11 +52,39 @@ async def evaluate_dataset(dataset_name: str, dataset_name_full: str, dataset_co
     
     # Load dataset
     print(f"Loading {dataset_name} dataset...")
-    if dataset_config is not None:
-        dataset = load_dataset(dataset_name_full, dataset_config)
-    else:
-        dataset = load_dataset(dataset_name_full)
-    eval_dataset = dataset["validation"].select(range(num_examples))
+    try:
+        if dataset_config is not None:
+            dataset = load_dataset(dataset_name_full, dataset_config)
+        else:
+            dataset = load_dataset(dataset_name_full)
+        eval_dataset = dataset["validation"].select(range(num_examples))
+    except Exception as e:
+        # For MuSiQue, try GitHub fallback if HuggingFace fails
+        if dataset_name == "MuSiQue":
+            print(f"⚠️  HuggingFace load failed: {e}")
+            print("Attempting to load from GitHub repository...")
+            try:
+                from agents.musique_document_loader import _load_musique_from_github
+                examples = _load_musique_from_github("validation")
+                # Create a simple dataset-like object
+                class SimpleDataset:
+                    def __init__(self, data):
+                        self.data = data
+                    def __getitem__(self, idx):
+                        return self.data[idx]
+                    def __len__(self):
+                        return len(self.data)
+                    def select(self, indices):
+                        return SimpleDataset([self.data[i] for i in indices])
+                
+                eval_dataset = SimpleDataset(examples).select(range(min(num_examples, len(examples))))
+                print(f"✅ Successfully loaded {len(eval_dataset)} examples from GitHub")
+            except Exception as github_error:
+                raise Exception(f"Failed to load MuSiQue from both HuggingFace and GitHub.\n"
+                              f"HuggingFace error: {e}\n"
+                              f"GitHub error: {github_error}")
+        else:
+            raise
     
     results = []
     total_em = 0.0
@@ -77,7 +106,16 @@ async def evaluate_dataset(dataset_name: str, dataset_name_full: str, dataset_co
         elif dataset_name == "HotpotQA":
             ground_truth = example["answer"]
         elif dataset_name == "MuSiQue":
-            ground_truth = example.get("answer", "")
+            # MuSiQue answer might be a string or list
+            answer_raw = example.get("answer", "")
+            if isinstance(answer_raw, list):
+                # If answer is a list, take the first one or join them
+                ground_truth = answer_raw[0] if answer_raw else ""
+            elif isinstance(answer_raw, dict):
+                # If answer is a dict, try common keys
+                ground_truth = answer_raw.get("value", answer_raw.get("text", str(answer_raw)))
+            else:
+                ground_truth = str(answer_raw) if answer_raw else ""
         else:
             ground_truth = example.get("answer", "")
         
@@ -316,44 +354,59 @@ async def evaluate_dataset(dataset_name: str, dataset_name_full: str, dataset_co
     
     return results, avg_em, avg_f1, avg_latency, total_latency, avg_tokens
 
-async def main():
-    """Run evaluation on both datasets."""
+async def main(dataset: str = "all"):
+    """Run evaluation on specified dataset(s)."""
     print("🚀 Starting MA-RAG Pipeline Evaluation")
     print("=" * 60)
-        
-    # # Evaluate TriviaQA
-    # trivia_results, trivia_em, trivia_f1 = await evaluate_dataset(
-    #     "TriviaQA", 
-    #     "mandarjoshi/trivia_qa", 
-    #     "rc",  # Add this configuration
-    #     num_examples=2
-    # )
-
-    # Evaluate HotpotQA
-    hotpot_results, hotpot_em, hotpot_f1, hotpot_avg_latency, hotpot_total_latency, hotpot_avg_tokens = await evaluate_dataset(
-        "HotpotQA", 
-        "hotpot_qa", 
-        "distractor",
-        num_examples=20
-    )
     
-    # Evaluate MuSiQue
-    musique_results, musique_em, musique_f1, musique_avg_latency, musique_total_latency, musique_avg_tokens = await evaluate_dataset(
-        "MuSiQue", 
-        "allenai/musique", 
-        None,  # MuSiQue doesn't have configs like HotpotQA
-        num_examples=20
-    )
+    results_summary = []
+    
+    if dataset.lower() in ["all", "hotpotqa", "hotpot"]:
+        # Evaluate HotpotQA
+        print(f"\n{'='*60}")
+        print("Evaluating HotpotQA...")
+        print(f"{'='*60}")
+        hotpot_results, hotpot_em, hotpot_f1, hotpot_avg_latency, hotpot_total_latency, hotpot_avg_tokens = await evaluate_dataset(
+            "HotpotQA", 
+            "hotpot_qa", 
+            "distractor",
+            num_examples=5
+        )
+        results_summary.append(("HotpotQA", hotpot_em, hotpot_f1))
+        print(f"\nHotpotQA - EM: {hotpot_em:.4f}, F1: {hotpot_f1:.4f}")
+    
+    if dataset.lower() in ["all", "musique", "musique-v1"]:
+        # Evaluate MuSiQue
+        print(f"\n{'='*60}")
+        print("Evaluating MuSiQue...")
+        print(f"{'='*60}")
+        musique_results, musique_em, musique_f1, musique_avg_latency, musique_total_latency, musique_avg_tokens = await evaluate_dataset(
+            "MuSiQue", 
+            "allenai/musique-v1", 
+            None,  # MuSiQue doesn't have configs like HotpotQA
+            num_examples=20
+        )
+        results_summary.append(("MuSiQue", musique_em, musique_f1))
+        print(f"\nMuSiQue - EM: {musique_em:.4f}, F1: {musique_f1:.4f}")
     
     # Print summary
-    print(f"\n{'='*60}")
-    print("EVALUATION SUMMARY")
-    print(f"{'='*60}")
-    #print(f"TriviaQA - EM: {trivia_em:.4f}, F1: {trivia_f1:.4f}")
-    print(f"HotpotQA - EM: {hotpot_em:.4f}, F1: {hotpot_f1:.4f}")
-    print(f"MuSiQue - EM: {musique_em:.4f}, F1: {musique_f1:.4f}")
-    print(f"{'='*60}")
+    if results_summary:
+        print(f"\n{'='*60}")
+        print("EVALUATION SUMMARY")
+        print(f"{'='*60}")
+        for name, em, f1 in results_summary:
+            print(f"{name} - EM: {em:.4f}, F1: {f1:.4f}")
+        print(f"{'='*60}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser(description="Evaluate MA-RAG pipeline on datasets")
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="all",
+        choices=["all", "hotpotqa", "hotpot", "musique", "musique-v1"],
+        help="Dataset to evaluate: 'all' (default), 'hotpotqa', or 'musique'"
+    )
+    args = parser.parse_args()
+    asyncio.run(main(args.dataset))
 

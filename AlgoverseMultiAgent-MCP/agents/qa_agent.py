@@ -237,8 +237,9 @@ Extract the final answer as a short phrase copied EXACTLY from the evidence.
 - Do NOT paraphrase
 - Do NOT modify wording
 - Do NOT infer anything not explicitly in the evidence
-- If the answer is not directly present in the evidence, output "unknown"
-- ONLY return "unknown" if, AFTER checking for typos, misspellings, and contextual matches, the answer is still not present in the evidence
+- If evidence was provided by the Extractor Agent, extract the answer from it - the Extractor already handled contextual matching
+- ONLY return "unknown" if NO evidence was provided at all
+- If evidence exists, extract the most relevant answer following the Answer Format Rules
 
 Your response MUST be a valid JSON object with this exact structure:
 {{
@@ -261,31 +262,31 @@ Your response MUST be a valid JSON object with this exact structure:
    - Rule: Extract ONLY the entity name - nothing else
    - ❌ WRONG: "[group name] formed by [entity]" (includes extra context)
    - ✅ CORRECT: "[entity name]" (just the entity)
-   - Example: Question "formed by who?" → Answer: "Martin Luther King Junior" (not "Montgomery Improvement Association formed by Martin Luther King Junior")
+   - Example: Question "formed by who?" → Answer: "[Person Name]" (not "[Organization Name] formed by [Person Name]")
 
 **2. Numerical Questions (e.g., "how many people?", "how many cars?", "what capacity?")**
    - Rule: Extract ONLY the number and unit (if specified) - nothing else
    - ❌ WRONG: "[venue name] [number] people" (includes venue name)
    - ❌ WRONG: "[number] people" when ground truth is "[number] seated" (wrong unit)
    - ✅ CORRECT: "[number]" or "[number] [unit]" (just the number and correct unit from evidence)
-   - Example: Question "can serve how many guests?" → Answer: "400 guests" (not "white house 400 people")
+   - Example: Question "can serve how many guests?" → Answer: "[number] guests" (not "[venue name] [number] people")
    - If evidence specifies a unit (e.g., "seated", "people", "cars"), use that exact unit
 
 **3. Location Questions (e.g., "in what [city]?", "located in what [city]?")**
    - Rule: Extract the location information that directly answers the question
    - If the question asks for a location within a city, include both neighborhood and city if both are mentioned in evidence
    - If the question asks for just a city, extract only the city name
-   - Extract the format that appears in the evidence (e.g., "Midtown, New York" or "New York" depending on what the question asks for)
+   - Extract the format that appears in the evidence (e.g., "[Neighborhood], [City]" or "[City]" depending on what the question asks for)
    - ❌ WRONG: Adding location details not present in evidence
    - ✅ CORRECT: Extract exactly what the question asks for, using the format from evidence
 
 **4. Specific Positions/Titles (e.g., "What position did X hold?", "What was X's role?")**
    - Rule: Extract ONLY ONE position - the most significant/relevant one if multiple exist
    - ❌ WRONG: "[position1] and [position2] and [position3]" (listing multiple)
-   - ❌ WRONG: "[position] of [country/organization]" (adding irrelevant organizational context like "Chief of Protocol of the United States" → should be "Chief of Protocol")
+   - ❌ WRONG: "[position] of [country/organization]" (adding irrelevant organizational context like "[Position Title] of [Country]" → should be "[Position Title]")
    - ✅ CORRECT: "[position name]" (ONE position - extract the FULL position title if it's multi-word)
-   - ✅ CORRECT: "Chief of Protocol" (preserve full multi-word titles - "of Protocol" is part of the title)
-   - ❌ WRONG: "Chief" (truncated - missing "of Protocol" which is part of the position name)
+   - ✅ CORRECT: "[Position Title]" (preserve full multi-word titles - connecting words like "of", "the" are part of the title)
+   - ❌ WRONG: "[Truncated Title]" (truncated - missing part of the position name)
    - Rule: If the question asks for "a position" or "the position" (singular) but evidence shows multiple positions:
      * Extract ONLY ONE position based on the evidence, prioritizing in this order:
        1. **Most directly relevant to question context** (if question mentions specific time period, event, or achievement, choose the position related to that)
@@ -293,8 +294,8 @@ Your response MUST be a valid JSON object with this exact structure:
        3. **Highest-ranking or most prominent** (if positions are equally emphasized, choose the most senior/significant role)
      * DO NOT prioritize based solely on duration unless the question specifically asks about duration
      * DO NOT list multiple positions - extract ONLY the position name itself
-     * PRESERVE full multi-word position titles (e.g., "Secretary of State", "Minister of Finance")
-     * REMOVE only extra organizational/country context (e.g., "Secretary of State of the United States" → "Secretary of State") 
+     * PRESERVE full multi-word position titles (e.g., "[Position Title] with connecting words")
+     * REMOVE only extra organizational/country context (e.g., "[Position Title] of [Country]" → "[Position Title]") 
 
 **5. Yes/No Questions (e.g., "Are X and Y the same?", "Did X do Y?")**
    - Rule: Answer with ONLY "Yes" or "No" - nothing else

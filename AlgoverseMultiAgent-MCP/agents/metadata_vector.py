@@ -166,9 +166,11 @@ class MetadataVectorGenerator:
         if any(keyword in main_question or keyword in reasoning_intent for keyword in comparison_keywords):
             return "compare"
         
-        # Check for temporal keywords
+        # Check for temporal keywords (prioritize main question, reasoning_intent can cause false positives)
         temporal_keywords = ["when", "before", "after", "first", "earlier", "later", "chronology", "timeline"]
-        if any(keyword in main_question or keyword in reasoning_intent for keyword in temporal_keywords):
+        # Only classify as temporal if main question has temporal keywords
+        # reasoning_intent from planner can be too generic and cause false positives
+        if any(keyword in main_question for keyword in temporal_keywords):
             return "temporal"
         
         # Check for cause-effect keywords
@@ -187,7 +189,14 @@ class MetadataVectorGenerator:
         elif query_type == "analytical":
             return "infer"
         elif query_type == "multi-hop":
-            return "join"  # Multi-hop often requires joining information
+            # Only classify as "join" if there are temporal indicators in the main question
+            # Otherwise, multi-hop can be factual extraction
+            # Note: Only check main_question to avoid false positives from reasoning_intent
+            temporal_keywords = ["when", "before", "after", "first", "earlier", "later", "chronology", "timeline"]
+            if any(keyword in main_question for keyword in temporal_keywords):
+                return "join"
+            else:
+                return "factual"  # Multi-hop factual extraction, not temporal join
         
         # Default
         return "factual"

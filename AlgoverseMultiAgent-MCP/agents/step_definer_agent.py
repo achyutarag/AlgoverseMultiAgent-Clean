@@ -48,12 +48,14 @@ class StepDefinerAgent(BaseAgent):
 3. **Precision Focus**: Create subqueries that enable precise and relevant document retrieval by being specific about what information is needed
 
 Guidelines for subquery generation:
-- Make subqueries specific and actionable for retrieval
-- Consider what context from previous steps might be relevant
+- Make subqueries specific and actionable for retrieval (must be searchable questions)
+- Each subquery should be a clear, answerable question that can be used to search documents
+- Include specific entity names, dates, locations from previous steps when available
 - Ensure subqueries are focused enough to retrieve precise information
 - Include necessary context and constraints in the subquery
 - Prioritize subqueries based on their importance to the step objective
 - Consider what types of documents or information sources would be most relevant
+- **CRITICAL: Avoid synthesis language** - DO NOT use words like "synthesize", "combine", "merge", "integrate", "assemble". Subqueries must be retrieval-focused questions, not synthesis instructions
 
 Return your response as a JSON object with this structure:
 {
@@ -106,7 +108,6 @@ Examples of good subquery generation:
         history = input_data.get('history', [])
         context = input_data.get('context', {})
         previous_answers = input_data.get('previous_answers', {})
-        relational_type = input_data.get('relational_type', 'factual')  # Get relational type for guidance
         max_subqueries = min(input_data.get('max_subqueries', self.max_subqueries), 5)  # Cap at 5
         
         if not step or 'id' not in step:
@@ -222,33 +223,6 @@ Return ONLY the JSON."""
                 sq_num = i + 1
                 previous_sqs = "\n".join([f"Sub-query {j+1}: {sq['query']}" for j, sq in enumerate(sub_queries)])
                 
-                # Add relational type-specific guidance
-                relational_guidance = ""
-                if relational_type == "compare":
-                    relational_guidance = """
-**RELATIONAL TYPE: COMPARISON**
-- This step involves comparing entities to identify which matches criteria
-- Generate subqueries that help IDENTIFY which entity matches, NOT extract attributes
-- For "Which X... or Y?" questions: Generate subqueries like "What is [attribute] of X?" and "What is [attribute] of Y?" to identify the matching entity
-- ❌ WRONG: "Compare the nationality of X and Y" (extracts attribute, changes question structure)
-- ✅ CORRECT: "What is the nationality of X?" and "What is the nationality of Y?" (helps identify which entity matches)
-- The goal is ENTITY MATCHING, not attribute extraction
-"""
-                elif relational_type == "temporal" or relational_type == "join":
-                    relational_guidance = """
-**RELATIONAL TYPE: TEMPORAL/JOIN**
-- This step involves connecting information across time points or sources
-- Generate subqueries that establish temporal relationships (before, after, sequence)
-- Focus on time-based connections: "when did X happen?", "what happened before Y?", "what is the sequence?"
-"""
-                elif relational_type == "infer" or relational_type == "cause-effect":
-                    relational_guidance = """
-**RELATIONAL TYPE: INFERENCE/CAUSE-EFFECT**
-- This step involves drawing conclusions or identifying cause-effect relationships
-- Generate subqueries that help establish logical connections
-- Focus on relationships: "why did X happen?", "what caused Y?", "what was the result of Z?"
-"""
-                
                 sq_prompt = f"""Step: {step_description}
 Objective: {step_objective}
 Original Query: {original_query}
@@ -257,12 +231,29 @@ Original Query: {original_query}
 Previous sub-queries:
 {previous_sqs if previous_sqs else "None yet"}
 
+**CRITICAL: RETRIEVAL-FOCUSED SUBQUERIES ONLY**
+Your sub-query MUST be a retrieval-focused question that can be used to search documents. It should:
+1. Be a clear, answerable question (e.g., "What is X?", "Who founded Y?", "When did Z happen?")
+2. Include specific entity names from previous steps when available (use exact names, dates, locations from previous answers)
+3. Be searchable - a document search engine should be able to find relevant documents using this query
+4. Avoid synthesis language - DO NOT use words like "synthesize", "combine", "merge", "integrate", "assemble", "put together"
+
+**❌ FORBIDDEN SYNTHESIS LANGUAGE:**
+- ❌ "Synthesize the distribution company and its founder" (synthesis, not retrieval)
+- ❌ "Combine information from step 1 and step 2" (synthesis, not retrieval)
+- ❌ "Merge the results to find..." (synthesis, not retrieval)
+- ❌ "Integrate the answers to determine..." (synthesis, not retrieval)
+
+**✅ CORRECT RETRIEVAL-FOCUSED SUBQUERIES:**
+- ✅ "What is the distribution company for UHF film?" (retrieval-focused, searchable)
+- ✅ "Who is a prominent founder of The Union during the 18th century?" (retrieval-focused, uses entity from previous step)
+- ✅ "What is Abraham Lincoln's role as a Union officer?" (retrieval-focused, includes entities)
+
 **IMPORTANT INSTRUCTIONS FOR MULTI-HOP QUERIES:**
-- If this step depends on previous steps, you should include the specific entity names, values, or information from previous answers in your sub-query when relevant
-- For example: If Step 1 found "John Smith" and Step 2 asks about John Smith's position, query "What position did John Smith hold?" rather than just "What position?"
-- When previous steps provide relevant entities (names, dates, locations, etc.), incorporate them into your sub-query to improve retrieval accuracy
-- Use the exact entity names, dates, locations, or other specific values from previous answers when they are directly relevant to the current step
-- However, if the current step is independent or doesn't need previous context, create a focused sub-query without forcing in previous information
+- If this step depends on previous steps, you MUST include the specific entity names, values, or information from previous answers in your sub-query
+- For example: If Step 1 found "Orion Pictures" and Step 2 asks about its founder, query "Who founded Orion Pictures?" (includes entity name)
+- Use the EXACT entity names, dates, locations, or other specific values from previous answers
+- If the current step is independent, create a focused retrieval sub-query without forcing in previous information
 
 **CRITICAL: Preserve Question Structure (Entity Matching vs Attribute Extraction)**
 - If the original question asks for an ENTITY NAME (e.g., "Which X... or Y?", "Who...?", "What is the name of...?"), generate subqueries that help IDENTIFY the entity, not extract attributes
@@ -270,27 +261,30 @@ Previous sub-queries:
 - ❌ WRONG: Question asks "Which writer was from England, X or Y?" → Subquery "Compare the nationality of X and Y" (extracts attribute, changes question structure)
 - ✅ CORRECT: Question asks "Which writer was from England, X or Y?" → Subqueries "What is the nationality of X?" and "What is the nationality of Y?" (helps identify which entity matches)
 - Preserve the original question's intent: entity selection vs attribute extraction
-{relational_guidance}
 
 Generate sub-query {sq_num} to help accomplish this step. Return a JSON object:
 
 **Example 1 (Simple)**: For step "Find the nationality of Scott Derrickson", return:
 {{
     "id": "sq_{sq_num}",
-    "query": "Scott Derrickson nationality American director",
+    "query": "What is Scott Derrickson's nationality?",
     "purpose": "Find Scott Derrickson's nationality or country of origin",
     "priority": {sq_num},
     "context_needed": ["factual"]
 }}
 
-**Example 2 (Multi-hop)**: If Step 1 found "Jane Doe" and Step 2 is "Find her government position", return:
+**Example 2 (Multi-hop)**: If Step 1 found "Orion Pictures" and Step 2 is "Find its founder", return:
 {{
     "id": "sq_{sq_num}",
-    "query": "Jane Doe government position held",
-    "purpose": "Find the government position held by Jane Doe",
+    "query": "Who founded Orion Pictures?",
+    "purpose": "Find the founder of Orion Pictures",
     "priority": {sq_num},
     "context_needed": ["factual"]
 }}
+
+**Example 3 (Avoiding Synthesis)**: If Step 1 found "UHF film" and Step 2 is "Find distribution company and founder", return TWO separate retrieval subqueries:
+- Subquery 1: "What is the distribution company for UHF film?"
+- Subquery 2: "Who founded [distribution company name from Step 1]?" (use entity from previous step)
 
 Return ONLY the JSON object, no other text."""
                 
