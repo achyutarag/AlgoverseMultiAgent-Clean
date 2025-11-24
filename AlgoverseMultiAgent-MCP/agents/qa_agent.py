@@ -110,23 +110,6 @@ Return a JSON object with this structure:
         max_history = int(input_data.get('max_history_items', 4))
         min_confidence = max(0.0, min(1.0, float(input_data.get('min_confidence', 0.0))))
         
-        # NEW: Extract metadata vector if provided
-        metadata_vector_dict = input_data.get('metadata_vector', {})
-        if metadata_vector_dict:
-            from .metadata_vector import MetadataVector
-            try:
-                metadata_vector = MetadataVector(**metadata_vector_dict)
-                reasoning_operator = metadata_vector.get_reasoning_operator()
-                logger.debug(f"Using metadata vector for QA: Operator={reasoning_operator}, "
-                           f"Type={metadata_vector.relational_type}")
-            except Exception as e:
-                logger.warning(f"Failed to parse metadata vector: {e}")
-                metadata_vector = None
-                reasoning_operator = "lookup"  # Default
-        else:
-            metadata_vector = None
-            reasoning_operator = "lookup"  # Default
-        
         # Normalize question for consistent processing
         question = tokenization_utils.normalize_query(question)
         
@@ -232,19 +215,36 @@ Return a JSON object with this structure:
 ### EXTRACTION INSTRUCTIONS:
 Using the question and evidence provided above:
 
+**CRITICAL: Detect Yes/No Questions Based on SUB-QUERY Format**
+- Check ONLY the subquery format (NOT the original question) to determine if this is a yes/no question
+- If the SUBQUERY starts with "Is", "Are", "Was", "Were", "Do", "Does", "Did", "Can", "Could", "Would", "Should", "Has", "Have", "Had" → This is a YES/NO question
+- For yes/no subqueries, you MUST return "Yes" or "No" based on whether the evidence confirms or denies the statement
+- For factual subqueries (e.g., "What is X's nationality?", "Find the use of Y"), extract the factual answer (e.g., "American", "real estate use") - DO NOT convert to yes/no
+- Example: Subquery "Is X from Y?" with evidence "X is from Y" → Answer: "Yes"
+- Example: Subquery "What is X's nationality?" with evidence "X is American" → Answer: "American" (NOT "Yes", even if original question is yes/no format)
+- Example: Subquery "Find the primary use of X" with evidence "X is used for real estate" → Answer: "real estate use" (factual extraction)
+
+**CRITICAL: Entity Extraction Priority**
+- If the subquery asks for an ENTITY NAME (e.g., "What is the name of...", "Who founded...", "What company..."), and the entity name appears in the evidence, extract the entity name
+- Do NOT return "unknown" just because related information (e.g., founder, date) is not found - if the entity itself is in the evidence, extract it
+- Example: Subquery "What is the distribution company for film X?" Evidence mentions "YG Entertainment" but doesn't mention founder → Answer: "YG Entertainment" (NOT "unknown")
+- Example: Subquery "Who founded YG Entertainment?" Evidence mentions "YG Entertainment" but doesn't mention founder → Answer: "unknown" (founder not found, which is what was asked)
+- Only return "unknown" if the SPECIFIC information asked for is not in the evidence
+
 Extract the final answer as a short phrase copied EXACTLY from the evidence.
 - Do NOT explain your answer
 - Do NOT paraphrase
 - Do NOT modify wording
 - Do NOT infer anything not explicitly in the evidence
 - If evidence was provided by the Extractor Agent, extract the answer from it - the Extractor already handled contextual matching
-- ONLY return "unknown" if NO evidence was provided at all
+- ONLY return "unknown" if the SPECIFIC information asked for is not present in the evidence
+- If the entity name is in evidence but related attributes aren't, extract the entity name (don't return "unknown" for entity questions)
 - If evidence exists, extract the most relevant answer following the Answer Format Rules
 
 Your response MUST be a valid JSON object with this exact structure:
 {{
     "question": "The original subquery",
-    "answer": "Extracted answer - copy exactly from evidence (typically 1-5 words, just 'Yes' or 'No' for yes/no questions)",
+    "answer": "Extracted answer - copy exactly from evidence (typically 1-5 words, 'Yes' or 'No' only if subquery is yes/no format)",
     "confidence": 0.0-1.0,
     "sources": ["doc1_id", "doc2_id"],
     "supporting_evidence": [
@@ -258,11 +258,25 @@ Your response MUST be a valid JSON object with this exact structure:
 
 ### CRITICAL: Answer Format Rules (READ FIRST):
 
-**1. Entity Names (e.g., "What is the name of...", "Who created...", "formed by who?")**
+**0. Yes/No Questions (Check SUB-QUERY Format Only)**
+   - **Detection**: Check ONLY the subquery format (ignore original question format for intermediate steps)
+   - Subqueries starting with "Is", "Are", "Was", "Were", "Do", "Does", "Did", "Can", "Could", "Would", "Should", "Has", "Have", "Had"
+   - **Rule**: Answer with ONLY "Yes" or "No" - nothing else
+   - **Conversion Logic**: 
+     * If subquery asks "Is X [attribute]?" and evidence confirms X is [attribute] → "Yes"
+     * If subquery asks "Is X [attribute]?" and evidence shows X is NOT [attribute] → "No"
+     * Example: Subquery "Is X from Y?" Evidence: "X is from Y" → Answer: "Yes"
+     * Example: Subquery "Was X born in Y?" Evidence: "X was born in Z" → Answer: "No"
+   - **IMPORTANT**: If subquery is factual (e.g., "What is X's nationality?"), extract the fact (e.g., "American") - do NOT convert to yes/no
+
+**1. Entity Names (e.g., "What is the name of...", "Who created...", "What company...", "What organization...")**
    - Rule: Extract ONLY the entity name - nothing else
+   - **CRITICAL**: If the question asks for an entity name and the entity appears in evidence, extract it even if related information (founder, date, etc.) is not found
    - ❌ WRONG: "[group name] formed by [entity]" (includes extra context)
    - ✅ CORRECT: "[entity name]" (just the entity)
+   - Example: Question "What is the distribution company for film X?" Evidence: "Film X was distributed by YG Entertainment" → Answer: "YG Entertainment" (even if founder info isn't in evidence)
    - Example: Question "formed by who?" → Answer: "[Person Name]" (not "[Organization Name] formed by [Person Name]")
+   - Example: Question "What company formed Winner?" Evidence mentions "YG Entertainment" and "Winner" but doesn't mention founder → Answer: "YG Entertainment" (entity is in evidence)
 
 **2. Numerical Questions (e.g., "how many people?", "how many cars?", "what capacity?")**
    - Rule: Extract ONLY the number and unit (if specified) - nothing else
@@ -272,13 +286,17 @@ Your response MUST be a valid JSON object with this exact structure:
    - Example: Question "can serve how many guests?" → Answer: "[number] guests" (not "[venue name] [number] people")
    - If evidence specifies a unit (e.g., "seated", "people", "cars"), use that exact unit
 
-**3. Location Questions (e.g., "in what [city]?", "located in what [city]?")**
-   - Rule: Extract the location information that directly answers the question
-   - If the question asks for a location within a city, include both neighborhood and city if both are mentioned in evidence
-   - If the question asks for just a city, extract only the city name
-   - Extract the format that appears in the evidence (e.g., "[Neighborhood], [City]" or "[City]" depending on what the question asks for)
+**3. Location Questions (e.g., "in what [city]?", "located in what [city]?", "based in what [location]?")**
+   - Rule: Extract the FULL location information that directly answers the question
+   - **CRITICAL**: Preserve the complete location string from evidence - do NOT truncate or simplify
+   - If evidence contains "[Neighborhood], [City]" (e.g., "Greenwich Village, New York City"), extract the FULL string "[Neighborhood], [City]"
+   - If evidence contains "[City], [State/Country]" (e.g., "New York City, New York"), extract the FULL string
+   - If the question specifically asks for just a city name and evidence has "[Neighborhood], [City]", you may extract just "[City]" - but ONLY if the question explicitly asks for "city" only
+   - If the question asks for "location", "base", "where", or similar general terms, extract the FULL location string from evidence
+   - ❌ WRONG: Evidence "Greenwich Village, New York City" → Answer "New York City" (truncated, missing neighborhood)
+   - ✅ CORRECT: Evidence "Greenwich Village, New York City" → Answer "Greenwich Village, New York City" (full location)
    - ❌ WRONG: Adding location details not present in evidence
-   - ✅ CORRECT: Extract exactly what the question asks for, using the format from evidence
+   - ✅ CORRECT: Extract exactly what appears in evidence, preserving full location strings
 
 **4. Specific Positions/Titles (e.g., "What position did X hold?", "What was X's role?")**
    - Rule: Extract ONLY ONE position - the most significant/relevant one if multiple exist
@@ -297,14 +315,11 @@ Your response MUST be a valid JSON object with this exact structure:
      * PRESERVE full multi-word position titles (e.g., "[Position Title] with connecting words")
      * REMOVE only extra organizational/country context (e.g., "[Position Title] of [Country]" → "[Position Title]") 
 
-**5. Yes/No Questions (e.g., "Are X and Y the same?", "Did X do Y?")**
-   - Rule: Answer with ONLY "Yes" or "No" - nothing else
-   - Even if the question mentions multiple entities with "and" or "both", answer with just "Yes" or "No"
-
-**6. Nationalities/Attributes (e.g., "What nationality was X?")**
+**5. Nationalities/Attributes (e.g., "What nationality was X?", "What is the use of X?")**
    - Rule: Extract ONLY the attribute asked for
    - ❌ WRONG: "[person] was [nationality]" (includes person name)
-   - ✅ CORRECT: "[nationality]" (just the attribute)
+   - ✅ CORRECT: "[nationality]" or "[attribute value]" (just the attribute)
+   - Example: Subquery "What is the primary use of X?" Evidence: "X is used for real estate" → Answer: "real estate use" (factual extraction)
 
 **7. Time Period Questions (e.g., "during what years?", "served during what timeframe?")**
    - Rule: Extract the time period exactly as it appears in the evidence
@@ -320,6 +335,7 @@ Your response MUST be a valid JSON object with this exact structure:
 5. **DO NOT** include venue names, organization names, or other context unless the question specifically asks for it
 6. If the question asks for one thing, provide ONLY that thing
 7. Rate your confidence honestly based on evidence quality
+8. **CRITICAL**: For intermediate steps, extract factual answers. The Final Assembler will handle yes/no reasoning for the original question.
 
 **HANDLING AMBIGUOUS QUESTIONS**: If the question asks for one thing but evidence contains multiple valid answers:
    - Choose the answer that is most prominently featured in the evidence, prioritizing in this order:

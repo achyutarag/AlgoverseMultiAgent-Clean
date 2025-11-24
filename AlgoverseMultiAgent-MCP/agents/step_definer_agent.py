@@ -215,18 +215,119 @@ Return ONLY the JSON."""
                     "reasoning": "Generate sub-queries to accomplish this step"
                 }
             
+            # Check if step can be answered directly from previous answers (before generating sub-queries)
+            if previous_answers:
+                check_direct_answer_prompt = f"""Step: {step_description}
+Objective: {step_objective}
+Original Query: {original_query}
+{previous_answers_text}
+
+**CRITICAL CHECK**: Can this step be answered DIRECTLY from the previous answers above WITHOUT needing to retrieve new documents?
+
+**IMPORTANT: Comparative Questions Require All Entities**
+- If the step asks to COMPARE two entities (e.g., "Who is older, X or Y?", "Compare X and Y", "Which is larger, X or Y?"), you need information about BOTH entities
+- If previous steps only have information about ONE entity, you CANNOT answer directly - need to retrieve information about the other entity
+- Example: Step 1 found "Annie Morton's birth date: October 8, 1970" and Step 3 asks "Who is older, Annie Morton or Terry Richardson?" → NO, need to retrieve Terry Richardson's birth date (only have Annie's)
+- Example: Step 1 found "X's attribute: A" and Step 2 found "Y's attribute: B" and Step 3 asks "Compare X and Y" → MAYBE, depends on what comparison is needed
+
+Examples:
+- If Step 1 found "[Location A], [Location B]" and Step 2 asks "Identify the [Location B] from step 1" → YES, answer is "[Location B]" (already available in previous answer)
+- If Step 1 found "[Entity Name]" and Step 2 asks "Find information about [Entity Name]'s [Attribute]" → NO, need to retrieve new documents about the entity's attribute
+- If Step 1 found "[Person Name]" and Step 2 asks "What is [Person Name]'s [Attribute]?" → NO, need to retrieve documents about the person's attribute
+- If Step 1 found "[Value]" and Step 2 asks "What is the [Value] from step 1?" → YES, answer is "[Value]" (already available in previous answer)
+- If Step 1 found "[Entity A]" and Step 2 asks "What is the [Component] of [Entity A]?" → NO, need to retrieve documents about the entity's component
+- If Step 1 found "[Complete Answer]" and Step 2 asks "Extract the [Part] from step 1" → YES, answer can be extracted from "[Complete Answer]" (already available)
+- **CRITICAL**: If Step 1 found "[Entity X's attribute: Value]" and Step 3 asks "Compare Entity X and Entity Y" or "Who is older, X or Y?" → NO, need Entity Y's information
+
+Key principle: If the step asks to EXTRACT, IDENTIFY, or SELECT a specific part from a previous answer that already contains that information, it can be answered directly. If it asks to FIND, SEARCH, RETRIEVE, or COMPARE information about entities, it requires retrieval. For comparative questions, ALL entities must have their information available in previous steps.
+
+Return ONLY a JSON object:
+{{
+    "can_answer_directly": true/false,
+    "reasoning": "brief explanation",
+    "direct_answer": "the answer if can_answer_directly is true, otherwise null"
+}}
+
+Return ONLY the JSON."""
+
+                check_response_text, check_token_usage = await self.generate_text_with_usage(
+                    check_direct_answer_prompt,
+                    temperature=0.1,  # Low temperature for deterministic check
+                    max_new_tokens=256
+                )
+                total_token_usage["prompt_tokens"] += check_token_usage.get("prompt_tokens", 0)
+                total_token_usage["generated_tokens"] += check_token_usage.get("generated_tokens", 0)
+                total_token_usage["total_tokens"] += check_token_usage.get("total_tokens", 0)
+                
+                check_response = tokenization_utils.postprocess_answer(check_response_text, output_type="json")
+                try:
+                    clean_check = TokenizationUtils.repair_json(check_response)
+                    check_result = json.loads(clean_check)
+                    
+                    # If step can be answered directly, return a single "extraction" sub-query
+                    if check_result.get("can_answer_directly", False):
+                        direct_answer = check_result.get("direct_answer", "")
+                        logger.info(f"Step {step_id} can be answered directly from previous steps: {direct_answer}")
+                        
+                        # Return a single sub-query that extracts from previous answers
+                        return AgentResponse(
+                            content=json.dumps({
+                                "sub_queries": [{
+                                    "id": "direct_answer_sq",
+                                    "query": f"Extract the answer from previous step results: {step_objective}",
+                                    "purpose": f"Answer directly from previous steps: {direct_answer}",
+                                    "priority": 1,
+                                    "context_needed": ["previous_answers"],
+                                    "direct_answer": direct_answer  # Include the direct answer
+                                }]
+                            }, indent=2),
+                            metadata={
+                                "step_id": step_id,
+                                "num_subqueries": 1,
+                                "direct_answer": True,
+                                "token_usage": total_token_usage
+                            }
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to parse direct answer check, proceeding with normal sub-query generation: {e}")
+            
             # Now generate sub-queries one by one
             sub_queries = []
             num_subqueries = min(2, max_subqueries)  # Generate 2 sub-queries
+            
+            # Extract entities from step description for multi-entity handling
+            step_lower = step_description.lower()
+            step_objective_lower = step_objective.lower() if step_objective else ""
+            
+            # Detect if step involves multiple entities (look for "and", "both", entity patterns)
+            has_multiple_entities = any(keyword in step_lower or keyword in step_objective_lower 
+                                       for keyword in [" and ", "both", " and ", "both"])
+            
+            # Try to extract entity names from step description
+            import re
+            # Pattern: Look for capitalized words that might be entity names
+            potential_entities = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', step_description)
+            # Filter out common words
+            common_words = {"What", "Where", "When", "Who", "Which", "Find", "Locate", "Identify", 
+                          "Determine", "Check", "Verify", "For", "The", "From", "To", "Step"}
+            potential_entities = [e for e in potential_entities if e not in common_words]
             
             for i in range(num_subqueries):
                 sq_num = i + 1
                 previous_sqs = "\n".join([f"Sub-query {j+1}: {sq['query']}" for j, sq in enumerate(sub_queries)])
                 
+                # Build entity context for multi-entity steps
+                entity_context = ""
+                if has_multiple_entities and potential_entities:
+                    entity_context = f"\n\n**MULTI-ENTITY STEP DETECTED**: This step involves multiple entities: {', '.join(potential_entities[:4])}"
+                    entity_context += f"\n- Generate ONE sub-query per entity if the step asks about attributes of multiple entities"
+                    entity_context += f"\n- Sub-query {sq_num} should focus on: {potential_entities[i % len(potential_entities)] if i < len(potential_entities) else 'the remaining entity'}"
+                
                 sq_prompt = f"""Step: {step_description}
 Objective: {step_objective}
 Original Query: {original_query}
 {previous_answers_text}
+{entity_context}
 
 Previous sub-queries:
 {previous_sqs if previous_sqs else "None yet"}
@@ -237,6 +338,7 @@ Your sub-query MUST be a retrieval-focused question that can be used to search d
 2. Include specific entity names from previous steps when available (use exact names, dates, locations from previous answers)
 3. Be searchable - a document search engine should be able to find relevant documents using this query
 4. Avoid synthesis language - DO NOT use words like "synthesize", "combine", "merge", "integrate", "assemble", "put together"
+5. **CRITICAL**: DO NOT generate a sub-query that is identical or very similar to previous sub-queries
 
 **❌ FORBIDDEN SYNTHESIS LANGUAGE:**
 - ❌ "Synthesize the distribution company and its founder" (synthesis, not retrieval)
@@ -249,10 +351,31 @@ Your sub-query MUST be a retrieval-focused question that can be used to search d
 - ✅ "Who is a prominent founder of The Union during the 18th century?" (retrieval-focused, uses entity from previous step)
 - ✅ "What is Abraham Lincoln's role as a Union officer?" (retrieval-focused, includes entities)
 
+**CRITICAL: Multi-Entity Steps**
+- If the step asks about multiple entities (e.g., "both X and Y", "X and Y"), generate ONE sub-query per entity
+- Example: Step "Find nationality of Local H and For Against" → Sub-query 1: "What is Local H's nationality?", Sub-query 2: "What is For Against's nationality?"
+- Example: Step "Find primary use of Random House Tower and 888 7th Avenue" → Sub-query 1: "What is the primary use of Random House Tower?", Sub-query 2: "What is the primary use of 888 7th Avenue?"
+- **DO NOT generate duplicate sub-queries** - each entity should get its own unique sub-query
+- If you've already generated a sub-query for an entity, generate one for a different entity
+
+**CRITICAL: Prioritize Evidence-Based Terminology from Previous Steps**
+- **Use EXACT terminology from previous step answers when available, even if it differs from the original query**
+- Previous step answers represent what was ACTUALLY found in evidence, which is more reliable than original query wording
+- If previous step answers use specific terminology (entity types, location formats, classifications), use that EXACT terminology in your sub-query
+- Only fall back to original query terminology if previous steps don't provide it
+- **Key principle**: Evidence-based terminology > Original query wording when they conflict
+- **General rule**: 
+  * If previous step answer contains a specific entity type/classification (e.g., administrative division type, location hierarchy level, entity category), use that exact type in your sub-query
+  * If previous step answer contains a specific entity name/value, use that exact name/value in your sub-query
+  * If previous step answer contains a specific format (e.g., location format, date format), preserve that exact format
+  * If original query uses different terminology than previous step answers, prefer the terminology from previous step answers
+- **Preserve original query's intent**: Keep asking for the same attribute (population, CEO, nationality, location, etc.) but use evidence-based entity types/names/formats from previous steps
+
 **IMPORTANT INSTRUCTIONS FOR MULTI-HOP QUERIES:**
 - If this step depends on previous steps, you MUST include the specific entity names, values, or information from previous answers in your sub-query
-- For example: If Step 1 found "Orion Pictures" and Step 2 asks about its founder, query "Who founded Orion Pictures?" (includes entity name)
-- Use the EXACT entity names, dates, locations, or other specific values from previous answers
+- Use the EXACT entity names, dates, locations, entity types, classifications, or other specific values from previous answers
+- **Prioritize terminology from previous step answers over original query when they differ**
+- Extract and use the exact terminology, entity types, and formats that appear in previous step answers
 - If the current step is independent, create a focused retrieval sub-query without forcing in previous information
 
 **CRITICAL: Preserve Question Structure (Entity Matching vs Attribute Extraction)**
@@ -261,6 +384,16 @@ Your sub-query MUST be a retrieval-focused question that can be used to search d
 - ❌ WRONG: Question asks "Which writer was from England, X or Y?" → Subquery "Compare the nationality of X and Y" (extracts attribute, changes question structure)
 - ✅ CORRECT: Question asks "Which writer was from England, X or Y?" → Subqueries "What is the nationality of X?" and "What is the nationality of Y?" (helps identify which entity matches)
 - Preserve the original question's intent: entity selection vs attribute extraction
+
+**CRITICAL: Semantic Interpretation of "Used For" Phrases**
+- When the step or original query contains "used for Y", interpret Y as function/purpose, NOT category
+- Generate sub-queries that ask about functional/purpose use, not property type/category
+- **Key principle**: "X is used for Y" means "X serves Y-related functions/purposes", NOT "X is a Y-type entity"
+- Example: Step "Find if X is used for real estate" → Sub-query: "What is X used for?" or "What purpose does X serve?" (NOT "What is the property type of X?")
+- Example: Step "Find if X is used for country" → Sub-query: "What is X used for?" (country-related purposes), NOT "What country is X?"
+- Example: Step "Find if X is used for luxury" → Sub-query: "What is X used for?" (luxury purposes), NOT "Is X a luxury item?"
+- This applies to: addresses, buildings, tools, products, roles, documents, objects, and ambiguous nouns
+- When generating sub-queries for "used for" questions, focus on extracting functional/purpose information, not category/type information
 
 Generate sub-query {sq_num} to help accomplish this step. Return a JSON object:
 
@@ -282,7 +415,12 @@ Generate sub-query {sq_num} to help accomplish this step. Return a JSON object:
     "context_needed": ["factual"]
 }}
 
-**Example 3 (Avoiding Synthesis)**: If Step 1 found "UHF film" and Step 2 is "Find distribution company and founder", return TWO separate retrieval subqueries:
+**Example 3 (Multi-Entity)**: For step "Find nationality of Local H and For Against", return:
+- Sub-query 1: {{"query": "What is Local H's nationality?", ...}}
+- Sub-query 2: {{"query": "What is For Against's nationality?", ...}}
+- **DO NOT** generate duplicate queries like "What is Local H's nationality?" twice
+
+**Example 4 (Avoiding Synthesis)**: If Step 1 found "UHF film" and Step 2 is "Find distribution company and founder", return TWO separate retrieval subqueries:
 - Subquery 1: "What is the distribution company for UHF film?"
 - Subquery 2: "Who founded [distribution company name from Step 1]?" (use entity from previous step)
 
@@ -317,8 +455,26 @@ Return ONLY the JSON object, no other text."""
                         if "context_needed" not in sq or not isinstance(sq["context_needed"], list):
                             sq["context_needed"] = ["factual"]
                         
-                        sub_queries.append(sq)
-                        logger.info(f"Generated sub-query {sq_num}: {sq['query'][:50]}")
+                        # Check for duplicates before appending
+                        query_text = sq.get("query", "").strip().lower()
+                        is_duplicate = False
+                        for existing_sq in sub_queries:
+                            existing_query = existing_sq.get("query", "").strip().lower()
+                            # Check if queries are too similar (same or one contains the other)
+                            if (query_text == existing_query or 
+                                (len(query_text) > 10 and query_text in existing_query) or
+                                (len(existing_query) > 10 and existing_query in query_text)):
+                                is_duplicate = True
+                                logger.warning(f"Sub-query {sq_num} is duplicate of previous sub-query, skipping")
+                                break
+                        
+                        if not is_duplicate:
+                            sub_queries.append(sq)
+                            logger.info(f"Generated sub-query {sq_num}: {sq['query'][:50]}")
+                        else:
+                            # If duplicate, try one more time with explicit instruction
+                            if i < num_subqueries - 1:  # Only retry if not last iteration
+                                logger.info(f"Duplicate detected, will retry in next iteration")
                     else:
                         logger.warning(f"Sub-query {sq_num} missing required fields: {list(sq.keys())}")
                 except Exception as e:

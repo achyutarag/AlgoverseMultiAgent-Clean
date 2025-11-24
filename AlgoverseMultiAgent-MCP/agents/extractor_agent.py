@@ -156,7 +156,7 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
         documents = input_data.get('documents', [])
         history = input_data.get('history', [])
         max_documents = min(int(input_data.get('max_documents', 8)), 15)
-        min_relevance = max(0.0, min(1.0, float(input_data.get('min_relevance', 0.3))))
+        min_relevance = max(0.0, min(1.0, float(input_data.get('min_relevance', 0.2))))  # Lowered from 0.3 to 0.2
         context_needed = input_data.get('context_needed', ['factual'])
         
         # Normalize query for consistent processing
@@ -231,8 +231,8 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
             
             ### CRITICAL REQUIREMENTS (MUST FOLLOW - READ FIRST):   
             - ⚠️ Extract passages with relevance ≥ {min_relevance} (use this exact threshold, not 0.3)
-            - ⚠️ Extract passages that have ANY semantic connection to the query (even if weak, relevance 0.2-0.4)"
-            - ⚠️ If documents have NO semantic connection to the query, you may return empty array BUT must provide detailed extraction_reasoning explaining why no passages were relevant"
+            - ⚠️ Extract passages that have ANY semantic connection to the query (even if weak, relevance 0.2-0.4)
+            - ⚠️ If documents have NO semantic connection to the query, you may return empty array BUT must provide detailed extraction_reasoning explaining why no passages were relevant
             - ⚠️ Do NOT extract completely unrelated passages just to populate the array - quality over quantity
             - ⚠️ If documents contain ANY information related to the subquery (even indirectly), you MUST extract at least 1-2 passages
             - ⚠️ Being "somewhat relevant" (relevance 0.2-0.4) is acceptable - extract these passages!
@@ -248,6 +248,14 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
             - DO NOT skip passages just because exact words don't match - check for contextual/phonetic similarity FIRST
             - Match query terms to document terms based on CONTEXTUAL FIT, not exact spelling
             - Use document context to determine word meanings, not world knowledge
+
+            ### ⚠️ CRITICAL: Use Evidence-Based Terminology in Reasoning
+            - When writing reasoning for extracted passages, use the EXACT terminology from the evidence, not from the query
+            - If the evidence uses different terminology than the query (e.g., evidence says "county" but query says "country"), use the evidence's terminology in your reasoning
+            - Example: If query asks for "country" but evidence says "Brown County", your reasoning should say "reinforcing the county information" not "reinforcing the country information"
+            - The evidence's terminology is the source of truth - use it in your reasoning to accurately reflect what was actually found
+            - This ensures downstream agents (like step definer) can learn from evidence-based terminology, not query-based terminology
+            - **Key principle**: Evidence terminology > Query terminology when they differ
 
             ### ❌ WRONG - DO NOT DO THIS:
             {{
@@ -272,31 +280,32 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
             }}
 
 
-            ### ⚠️ IMPORTANT - When to use empty array:
-            - ALWAYS extract at least 1 passage when documents are provided
-            - If documents don't match the query, extract a passage explaining why (relevance 0.2-0.3)
-            - Being "somewhat relevant" (relevance 0.2-0.4) is STILL RELEVANT - extract it!
-            - Empty array is ONLY acceptable if NO documents were provided at all
+            ### ⚠️ CRITICAL - What counts as "relevant" (BE INCLUSIVE):
+            - A passage is relevant if it contains information that HELPS answer the subquery (even partially or indirectly)
+            - Extract passages that mention the entity AND provide related context (not just the entity name alone)
+            - Partial answers are acceptable - if a passage provides part of the answer, extract it
+            - Indirect information that helps answer the question is acceptable (relevance 0.2-0.4)
+            - Only return empty array if documents have NO semantic connection to the query at all
+            - When in doubt, extract the passage (let the QA agent filter if needed)
                     
             ### Instructions:
             Please perform fine-grained extraction focusing on:
-            1. Extract sentences or spans that are relevant to the subquery (be inclusive, not restrictive)
-            2. Include information that helps answer the subquery, even if indirectly
-            3. Combine complementary information from multiple sources
-            Assign relevance scores based on actual relevance:
-            - {min_relevance}-0.5: Somewhat relevant, indirectly related (ACCEPTABLE - extract these)
-            - 0.5-0.7: Relevant, helps answer the query
+            1. Extract sentences or spans that HELP answer the subquery (including partial or indirect information)
+            2. Extract passages that contain information related to the question (be inclusive, not restrictive)
+            3. Combine complementary information from multiple sources when they help answer the question
+            Assign relevance scores based on how well the passage helps answer the question:
+            - {min_relevance}-0.5: Somewhat relevant, contains partial answer or indirect information that helps answer (EXTRACT THESE)
+            - 0.5-0.7: Relevant, contains information that helps answer the query
             - 0.7-1.0: Highly relevant, directly answers the query
-            - Below {min_relevance}: Do NOT extract (not relevant enough)
-            5. Provide reasoning for each extraction decision
-            6. Create an aggregated summary of all relevant evidence
+            - Below {min_relevance}: Only skip if completely unrelated to the query
+            4. Provide reasoning for each extraction decision
+            5. Create an aggregated summary of all relevant evidence
 
             ### FINAL REMINDER BEFORE RETURNING JSON:
-            1. Extract at least 1-2 passages if any document has relevance ≥ {min_relevance}
-            2. If documents don't match the query, extract at least 1 passage explaining why (with low relevance 0.2-0.3)
-            3. NEVER return completely empty array - always extract at least 1 passage when documents are provided
-            4. Extract exact text from the documents provided above
-            5. Do NOT summarize - extract specific passages
+            1. Extract passages that help answer the subquery (including partial or indirect information)
+            2. Be inclusive - if a passage has any semantic connection to the query, extract it
+            3. Only return empty array if documents have NO semantic connection to the query at all
+            4. Partial answers and indirect information are acceptable - extract these passages
             
             
             Return your response as a valid JSON object with the structure shown above.

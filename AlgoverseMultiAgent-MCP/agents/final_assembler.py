@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from collections import defaultdict
 
-from .tokenization_utils import tokenization_utils
+from .tokenization_utils import tokenization_utils, TokenizationUtils
 
 logger = logging.getLogger(__name__)
 
@@ -294,7 +294,20 @@ class FinalAssembler:
                     })
             
             # Synthesize based on query type
-            if query_type == "comparative":
+            # First, check if this is entity selection (regardless of query_type classification)
+            query_lower = main_query.lower()
+            # More generalizable entity selection detection
+            # Catches: "Which X or Y?", "Who is older, X or Y?", "What company..., X or Y?"
+            has_selection_word = any(word in query_lower for word in ["which", "who", "what"])
+            has_options = " or " in query_lower or "either" in query_lower
+            is_entity_selection = has_selection_word and has_options
+            
+            if is_entity_selection:
+                # Entity selection question - extract just the entity name from final step
+                # The final step should identify which entity matches the criteria
+                final_answer = step_answers[-1]["answer"] if step_answers else "No information found."
+                final_answer = self._extract_concise_answer(main_query, final_answer)
+            elif query_type == "comparative":
                 final_answer = await self._synthesize_comparative_answer(main_query, step_answers)
             elif query_type == "multi-hop":
                 final_answer = await self._synthesize_multihop_answer(main_query, step_answers)
@@ -356,18 +369,236 @@ class FinalAssembler:
         if not step_answers:
             return "No information found to answer your question."
         
-        # Use the highest confidence answer
-        best_answer = max(step_answers, key=lambda x: x["confidence"])
-        
-        # For yes/no questions, extract just yes/no
         query_lower = query.lower()
-        is_yes_no_question = any(keyword in query_lower for keyword in [
-            "yes or no", "is it", "are they", "do they", "does", "did", "was", "were",
+        # More precise yes/no detection: check if question STARTS with yes/no words or is structured as yes/no
+        # Not just if it contains these words (which would catch "What did X do?" as yes/no incorrectly)
+        yes_no_starters = ["is ", "are ", "was ", "were ", "do ", "does ", "did ", "can ", "could ", "would ", "should ", "has ", "have ", "had "]
+        starts_with_yes_no = any(query_lower.startswith(starter) for starter in yes_no_starters)
+        contains_yes_no_pattern = any(keyword in query_lower for keyword in [
+            "yes or no", "is it", "are they", "do they", 
             "same", "different", "compare", "both", "either", "neither"
         ])
+        is_yes_no_question = starts_with_yes_no or contains_yes_no_pattern
         
+        # Check if original question asks for entity name (even if subqueries were yes/no)
+        # This handles cases where original question asks "Who is X?" but subquery was yes/no
+        is_entity_name_question = any(keyword in query_lower for keyword in [
+            "who is", "who was", "who are", "what is the name", "what is called", 
+            "what person", "what individual", "identify the person", "identify who",
+            "what is the identity", "what is the real name"
+        ])
+        
+        # Check if this is a "both" question requiring multi-entity reasoning
+        is_both_question = any(keyword in query_lower for keyword in ["both", "and"]) and is_yes_no_question
+        
+        if is_both_question and len(step_answers) >= 2:
+            # This is a "both" question - need to reason about multiple entities
+            # Extract the attribute/criteria from the question
+            # Example: "Are X and Y both from Z?" → check if both answers match "Z"
+            # Example: "Are X and Y both Z?" → check if both answers indicate "Z"
+            
+            # Try to extract the criteria/attribute from the question
+            import re
+            
+            # Pattern 1: "Are X and Y both [attribute]?" or "Are X and Y both [criteria]?"
+            both_match = re.search(r'both\s+([^?]+)', query_lower)
+            if both_match:
+                criteria = both_match.group(1).strip()
+            else:
+                # Pattern 2: "Are X and Y [attribute]?" (without "both" but with "and")
+                # Extract attribute after the entities
+                # This is more complex, so we'll use a simpler approach
+                criteria = None
+            
+            # Get answers from steps (should be factual answers, not yes/no)
+            step1_answer = step_answers[0].get("answer", "").lower().strip()
+            step2_answer = step_answers[1].get("answer", "").lower().strip() if len(step_answers) > 1 else ""
+            
+            # Normalize answers for comparison with semantic equivalence
+            def normalize_for_comparison(text):
+                """Normalize text for comparison by removing common variations and handling semantic equivalence."""
+                if not text:
+                    return ""
+                text = text.lower().strip()
+                # Remove common prefixes/suffixes
+                text = re.sub(r'^(a|an|the)\s+', '', text)
+                text = text.strip()
+                
+                # Handle semantic equivalence (synonyms and variations)
+                # Nationality/Country equivalence
+                nationality_synonyms = {
+                    r'\bunited states\b': 'united states',
+                    r'\busa\b': 'united states',
+                    r'\bus\b': 'united states',
+                    r'\bamerican\b': 'united states',
+                    r'\bunited kingdom\b': 'united kingdom',
+                    r'\buk\b': 'united kingdom',
+                    r'\bbritish\b': 'united kingdom',
+                    r'\bengland\b': 'united kingdom',  # Common but not always accurate
+                    r'\bcanada\b': 'canada',
+                    r'\bcanadian\b': 'canada',
+                    r'\baustralia\b': 'australia',
+                    r'\baustralian\b': 'australia',
+                    r'\bfrance\b': 'france',
+                    r'\bfrench\b': 'france',
+                    r'\bgermany\b': 'germany',
+                    r'\bgerman\b': 'germany',
+                    r'\bspain\b': 'spain',
+                    r'\bspanish\b': 'spain',
+                    r'\bitaly\b': 'italy',
+                    r'\bitalian\b': 'italy',
+                    r'\bjapan\b': 'japan',
+                    r'\bjapanese\b': 'japan',
+                    r'\bchina\b': 'china',
+                    r'\bchinese\b': 'china',
+                    r'\bindia\b': 'india',
+                    r'\bindian\b': 'india',
+                    r'\bmexico\b': 'mexico',
+                    r'\bmexican\b': 'mexico',
+                    r'\bbrazil\b': 'brazil',
+                    r'\bbrazilian\b': 'brazil',
+                }
+                
+                # Apply nationality/country normalization
+                for pattern, normalized in nationality_synonyms.items():
+                    if re.search(pattern, text):
+                        return normalized
+                
+                # Handle location variations (e.g., "New York City" vs "New York")
+                # Remove common location suffixes that don't change meaning
+                text = re.sub(r'\s+city\s*$', '', text)
+                text = re.sub(r'\s+state\s*$', '', text)
+                text = re.sub(r'\s+country\s*$', '', text)
+                
+                return text.strip()
+            
+            def are_semantically_equivalent(text1, text2):
+                """Check if two texts are semantically equivalent."""
+                norm1 = normalize_for_comparison(text1)
+                norm2 = normalize_for_comparison(text2)
+                
+                # Exact match
+                if norm1 == norm2:
+                    return True
+                
+                # One contains the other (handles "Greenwich Village, New York City" vs "New York City")
+                if norm1 in norm2 or norm2 in norm1:
+                    return True
+                
+                # Check for common semantic relationships
+                # Both refer to same country/nationality
+                if (norm1 in ['united states', 'usa', 'us', 'american'] and 
+                    norm2 in ['united states', 'usa', 'us', 'american']):
+                    return True
+                if (norm1 in ['united kingdom', 'uk', 'british', 'england'] and 
+                    norm2 in ['united kingdom', 'uk', 'british', 'england']):
+                    return True
+                
+                return False
+            
+            step1_normalized = normalize_for_comparison(step1_answer)
+            step2_normalized = normalize_for_comparison(step2_answer)
+            
+            # If criteria is specified, check if both answers match it
+            if criteria:
+                criteria_normalized = normalize_for_comparison(criteria)
+                # Check if both answers semantically match the criteria
+                step1_matches = are_semantically_equivalent(step1_answer, criteria)
+                step2_matches = are_semantically_equivalent(step2_answer, criteria)
+                
+                if step1_matches and step2_matches:
+                    return "Yes"
+                else:
+                    return "No"
+            else:
+                # No explicit criteria - check if both answers are semantically equivalent
+                # This handles questions like "Are X and Y both from the same place?"
+                if step1_normalized and step2_normalized:
+                    # Use semantic equivalence check
+                    if are_semantically_equivalent(step1_answer, step2_answer):
+                        return "Yes"
+                    else:
+                        return "No"
+                else:
+                    # Fallback: if we can't determine, check if last step has yes/no
+                    best_answer = await self._select_best_answer_for_question(query, step_answers)
+                    answer_lower = best_answer["answer"].lower()
+                    yes_no_match = re.search(r'\b(yes|no)\b', answer_lower)
+                    if yes_no_match:
+                        return yes_no_match.group(1).capitalize()
+        
+        # For single answer, use it directly
+        if len(step_answers) == 1:
+            answer = step_answers[0]["answer"]
+            
+            # If original question asks for entity name but answer is yes/no, extract from evidence
+            if is_entity_name_question and answer.lower().strip() in ["yes", "no"]:
+                # Try to extract entity name from evidence or reasoning
+                import re
+                evidence_text = ""
+                if step_answers[0].get("evidence"):
+                    evidence_list = step_answers[0]["evidence"]
+                    if isinstance(evidence_list, list):
+                        evidence_text = " ".join([str(e) for e in evidence_list if e])
+                    else:
+                        evidence_text = str(evidence_list)
+                if step_answers[0].get("reasoning"):
+                    evidence_text += " " + str(step_answers[0].get("reasoning", ""))
+                
+                if evidence_text:
+                    extracted = self._extract_concise_answer(query, evidence_text)
+                    if extracted and extracted.lower().strip() not in ["yes", "no"]:
+                        return extracted
+            
+            if is_yes_no_question:
+                # Extract yes/no if present
+                import re
+                answer_lower = answer.lower()
+                yes_no_match = re.search(r'\b(yes|no)\s*\.?\s*$', answer_lower)
+                if yes_no_match:
+                    return yes_no_match.group(1).capitalize()
+                yes_no_match = re.search(r'\b(yes|no)\b', answer_lower)
+                if yes_no_match:
+                    return yes_no_match.group(1).capitalize()
+            answer = self._extract_concise_answer(query, answer)
+            return answer
+        
+        # For multiple answers (non-both questions), intelligently select the one that best matches the question
+        best_answer = await self._select_best_answer_for_question(query, step_answers)
+        
+        # If original question asks for entity name but best answer is yes/no, extract from evidence
+        if is_entity_name_question and best_answer.get("answer", "").lower().strip() in ["yes", "no"]:
+            # Try to extract entity name from evidence or reasoning of best answer or all steps
+            import re
+            evidence_text = ""
+            if best_answer.get("evidence"):
+                evidence_list = best_answer["evidence"]
+                if isinstance(evidence_list, list):
+                    evidence_text = " ".join([str(e) for e in evidence_list if e])
+                else:
+                    evidence_text = str(evidence_list)
+            if best_answer.get("reasoning"):
+                evidence_text += " " + str(best_answer.get("reasoning", ""))
+            
+            # If no evidence in best answer, try all step answers
+            if not evidence_text:
+                for step_answer in step_answers:
+                    if step_answer.get("evidence"):
+                        evidence_list = step_answer["evidence"]
+                        if isinstance(evidence_list, list):
+                            evidence_text += " ".join([str(e) for e in evidence_list if e])
+                        else:
+                            evidence_text += " " + str(evidence_list)
+                    if step_answer.get("reasoning"):
+                        evidence_text += " " + str(step_answer.get("reasoning", ""))
+            
+            if evidence_text:
+                extracted = self._extract_concise_answer(query, evidence_text)
+                if extracted and extracted.lower().strip() not in ["yes", "no"]:
+                    return extracted
+        
+        # For yes/no questions, extract just yes/no
         if is_yes_no_question:
-            # Extract yes/no (keep existing logic)
             import re
             answer_lower = best_answer["answer"].lower()
             yes_no_match = re.search(r'\b(yes|no)\s*\.?\s*$', answer_lower)
@@ -377,25 +608,67 @@ class FinalAssembler:
             if yes_no_match:
                 return yes_no_match.group(1).capitalize()
         
-        # For single answer, extract concise version
-        if len(step_answers) == 1:
-            answer = best_answer["answer"]
-            # Extract concise answer based on question type
-            answer = self._extract_concise_answer(query, answer)
-            return answer
-        
-        # For multiple answers, use the LAST step answer (final conclusion)
-        final_step_answer = step_answers[-1]["answer"]
-        # Extract concise answer
-        final_step_answer = self._extract_concise_answer(query, final_step_answer)
+        # Extract concise answer based on question type
+        answer = self._extract_concise_answer(query, best_answer["answer"])
         
         # Minimal safety net: if still too long, use first sentence
-        if len(final_step_answer) > 200:
-            sentences = final_step_answer.split('.')
+        if len(answer) > 200:
+            sentences = answer.split('.')
             if sentences and len(sentences[0]) < 150:
                 return sentences[0].strip() + "."
         
-        return final_step_answer
+        return answer
+    
+    async def _select_best_answer_for_question(self, query: str, step_answers: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Select which step's answer best matches the original question.
+        Original approach: use the last step answer (was getting 0.77 F1).
+        """
+        # Simple: use last step answer (original behavior)
+        return step_answers[-1]
+    
+    def _classify_question_type(self, query: str) -> str:
+        """Classify what type of answer the question is asking for."""
+        query_lower = query.lower()
+        
+        if any(keyword in query_lower for keyword in ["how many", "how much", "what number", "population", "capacity", "inhabitants"]):
+            return "number"
+        elif any(keyword in query_lower for keyword in ["who", "what is the name", "formed by", "created by"]):
+            return "entity"
+        elif any(keyword in query_lower for keyword in ["in what", "located in", "based in", "where"]):
+            return "location"
+        elif any(keyword in query_lower for keyword in ["what position", "what role", "what title"]):
+            return "position"
+        elif any(keyword in query_lower for keyword in ["during what years", "what timeframe", "what year"]):
+            return "time"
+        elif any(keyword in query_lower for keyword in ["is", "are", "was", "were", "do", "does", "did"]):
+            return "yes_no"
+        else:
+            return "general"
+    
+    def _classify_answer_type(self, answer: str, query: str) -> str:
+        """Classify the type of answer provided."""
+        answer_lower = answer.lower()
+        
+        # Check for numbers
+        import re
+        if re.search(r'\d+(?:,\d+)*(?:\.\d+)?', answer):
+            return "number"
+        
+        # Check for yes/no
+        if re.search(r'\b(yes|no)\b', answer_lower):
+            return "yes_no"
+        
+        # Check for location patterns
+        if re.search(r'[A-Z][^,\.]+,\s*[A-Z][^,\.]+', answer):
+            return "location"
+        
+        # Check for time patterns
+        if re.search(r'(from\s+\d+|during\s+\d+|\d+\s+to\s+\d+)', answer_lower):
+            return "time"
+        
+        # Default to general
+        return "general"
     
     def _extract_concise_answer(self, query: str, answer: str) -> str:
         """

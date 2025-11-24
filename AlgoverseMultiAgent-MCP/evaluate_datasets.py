@@ -370,7 +370,7 @@ async def main(dataset: str = "all"):
             "HotpotQA", 
             "hotpot_qa", 
             "distractor",
-            num_examples=5
+            num_examples=20
         )
         results_summary.append(("HotpotQA", hotpot_em, hotpot_f1))
         print(f"\nHotpotQA - EM: {hotpot_em:.4f}, F1: {hotpot_f1:.4f}")
@@ -384,7 +384,7 @@ async def main(dataset: str = "all"):
             "MuSiQue", 
             "allenai/musique-v1", 
             None,  # MuSiQue doesn't have configs like HotpotQA
-            num_examples=20
+            num_examples=5
         )
         results_summary.append(("MuSiQue", musique_em, musique_f1))
         print(f"\nMuSiQue - EM: {musique_em:.4f}, F1: {musique_f1:.4f}")

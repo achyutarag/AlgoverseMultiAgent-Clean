@@ -1,0 +1,29 @@
+Question,Prediction,Ground_Truth,ExactMatch,F1Score,Latency(s),Total_Tokens,Input_Tokens,Output_Tokens
+Were Scott Derrickson and Ed Wood of the same nationality?,yes,yes,1.0,1.0,33.25,20756,15283,1511
+What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?,Chief of Protocol,Chief of Protocol,1.0,1.0,71.65,42355,28541,2729
+"What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?",Animorphs,Animorphs,1.0,1.0,85.03,49325,32427,4382
+Are the Laleli Mosque and Esma Sultan Mansion located in the same neighborhood?,no,no,1.0,1.0,58.70,37995,27167,2402
+"The director of the romantic comedy ""Big Stone Gap"" is based in what New York city?","Greenwich Village, New York City","Greenwich Village, New York City",1.0,1.0,59.02,37734,26570,2135
+2014 S/S is the debut album of a South Korean boy group that was formed by who?,Entertainment,YG Entertainment,0.0,0.6666666666666666,36.95,33805,26836,2386
+Who was known by his stage name Aladin and helped organizations improve their performance as a consultant?,Eenasul Fateh,Eenasul Fateh,1.0,1.0,99.53,48917,28059,2772
+The arena where the Lewiston Maineiacs played their home games can seat how many people?,"3,677 seated","3,677 seated",1.0,1.0,45.96,36835,27843,2905
+"Who is older, Annie Morton or Terry Richardson?","Based on the analysis, here's a comparison: 1. Find the birth date or age of Annie Morton.: October 8, 1970 2. Find the birth date or age of Terry Richardson.: August 14, 1965 3. Retrieve the name of the individual who is older, based on the birth dates or ages obtained in Step 1 and Step 2.: Terry Richardson This comparison provides a comprehensive view of the differences and similarities",Terry Richardson,0.0,0.06349206349206349,41.78,35632,27866,2676
+Are Local H and For Against both from the United States?,no,yes,0.0,0.0,97.46,50460,30903,3177
+"What is the name of the fight song of the university whose main campus is in Lawrence, Kansas and whose branch campuses are in the Kansas City metropolitan area?",Kansas Song,Kansas Song,1.0,1.0,60.20,40669,28419,2916
+"What screenwriter with credits for ""Evolution"" co-wrote a film starring Nicolas Cage and Téa Leoni?",David Weissman,David Weissman,1.0,1.0,123.13,57379,32013,3370
+What year did Guns N Roses perform a promo for a movie starring Arnold Schwarzenegger as a former New York Police detective?,1999,1999,1.0,1.0,84.12,46409,29689,3848
+Are Random House Tower and 888 7th Avenue both used for real estate?,yes,no,0.0,0.0,44.18,37533,29220,3699
+The football manager who recruited David Beckham managed Manchester United during what timeframe?,From 1986 to 2013,from 1986 to 2013,1.0,1.0,54.44,37271,26912,3684
+Brown State Fishing Lake is in a country that has a population of how many inhabitants ?,Unknown,"9,984",0.0,0.0,91.45,58546,41056,3256
+The Vermont Catamounts men's soccer team currently competes in a conference that was formerly known as what from 1988 to 1996?,The North Atlantic Conference,the North Atlantic Conference,1.0,1.0,92.86,48301,29290,2838
+Are Giuseppe Verdi and Ambroise Thomas both Opera composers ?,yes,yes,1.0,1.0,62.40,27989,15008,2698
+Roger O. Egeberg was Assistant Secretary for Health and Scientific Affairs during the administration of a president that served during what years?,From 1969 until 1974,1969 until 1974,0.0,0.8571428571428571,40.15,35695,28173,2628
+"Which writer was from England, Henry Roth or Robert Erskine Childers?","Based on the analysis, here's a comparison: 1. Find the country of origin or nationality for Henry Roth and Robert Erskine Childers.: American; English-born writer and Irish nationalist 2. Identify which of the two writers, Henry Roth or Robert Erskine Childers, is from England, based on their country of origin found in Step 1.: Robert Erskine Childers 3. State the writer identified in Step 2 as being from England.: Robert Erskine Childers This comparison provides a comprehensive view of the differences and similarities",Robert Erskine Childers DSC,0.0,0.075,56.93,27675,15941,2433
+
+Summary,,,,,,,,
+Exact Match,,,0.6500,,,,,
+F1 Score,,,0.7331,,,,,
+Latency/Q (s),,,66.96,,,,,
+Total Latency (s),,,1339.20,,,,,
+Tokens/Q,,,40564,,,40564,27361,2922
+Examples,,,20,,,,,
