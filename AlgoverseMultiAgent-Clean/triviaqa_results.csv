@@ -1,0 +1,6 @@
+Question,Prediction,Ground_Truth,ExactMatch,F1Score
+Who was the man behind The Chipmunks?,ERROR,David Seville,0.0,0.0
+Which Lloyd Webber musical premiered in the US on 10th December 1993?,ERROR,Sunset Boulevard,0.0,0.0
+Who was the next British Prime Minister after Arthur Balfour?,ERROR,Campbell-Bannerman,0.0,0.0
+Who had a 70s No 1 hit with Kiss You All Over?,ERROR,Exile,0.0,0.0
+What claimed the life of singer Kathleen Ferrier?,ERROR,Cancer,0.0,0.0

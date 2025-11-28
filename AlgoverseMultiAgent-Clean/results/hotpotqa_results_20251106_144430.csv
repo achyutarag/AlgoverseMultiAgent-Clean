@@ -1,0 +1,29 @@
+Question,Prediction,Ground_Truth,ExactMatch,F1Score,Latency(s),Tokens
+Were Scott Derrickson and Ed Wood of the same nationality?,yes,yes,1.0,1.0,64.16,1507
+What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?,Chief of Protocol of the United States,Chief of Protocol,0.0,0.6666666666666666,123.84,1518
+"What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?",Animorphs,Animorphs,1.0,1.0,116.19,1518
+Are the Laleli Mosque and Esma Sultan Mansion located in the same neighborhood?,no,no,1.0,1.0,81.03,1509
+"The director of the romantic comedy ""Big Stone Gap"" is based in what New York city?","Greenwich Village, New York City","Greenwich Village, New York City",1.0,1.0,66.24,1515
+2014 S/S is the debut album of a South Korean boy group that was formed by who?,YG Entertainment,YG Entertainment,1.0,1.0,73.96,1513
+Who was known by his stage name Aladin and helped organizations improve their performance as a consultant?,Eenasul Fateh,Eenasul Fateh,1.0,1.0,105.96,1513
+The arena where the Lewiston Maineiacs played their home games can seat how many people?,"3,677 seated","3,677 seated",1.0,1.0,75.42,1512
+"Who is older, Annie Morton or Terry Richardson?",Terry Richardson,Terry Richardson,1.0,1.0,64.70,1507
+Are Local H and For Against both from the United States?,yes,yes,1.0,1.0,71.71,1508
+"What is the name of the fight song of the university whose main campus is in Lawrence, Kansas and whose branch campuses are in the Kansas City metropolitan area?",Kansas Song,Kansas Song,1.0,1.0,67.49,1522
+"What screenwriter with credits for ""Evolution"" co-wrote a film starring Nicolas Cage and Téa Leoni?",David Weissman,David Weissman,1.0,1.0,85.37,1512
+What year did Guns N Roses perform a promo for a movie starring Arnold Schwarzenegger as a former New York Police detective?,1999,1999,1.0,1.0,135.38,1516
+Are Random House Tower and 888 7th Avenue both used for real estate?,yes,no,0.0,0.0,95.29,1509
+The football manager who recruited David Beckham managed Manchester United during what timeframe?,1986 to 2013,from 1986 to 2013,0.0,0.8571428571428571,85.91,1511
+Brown State Fishing Lake is in a country that has a population of how many inhabitants ?,"Brown State Fishing Lake is located in the United States, but its population is not provided in the evidence","9,984",0.0,0.0,108.23,1526
+The Vermont Catamounts men's soccer team currently competes in a conference that was formerly known as what from 1988 to 1996?,North Atlantic Conference,the North Atlantic Conference,1.0,1.0,65.66,1517
+Are Giuseppe Verdi and Ambroise Thomas both Opera composers ?,yes,yes,1.0,1.0,85.07,1507
+Roger O. Egeberg was Assistant Secretary for Health and Scientific Affairs during the administration of a president that served during what years?,1969 until 1974,1969 until 1974,1.0,1.0,71.57,1518
+"Which writer was from England, Henry Roth or Robert Erskine Childers?",Robert Erskine Childers,Robert Erskine Childers DSC,0.0,0.8571428571428571,51.94,1510
+
+Summary,,,,,,
+Exact Match,,,0.7500,,,
+F1 Score,,,0.8690,,,
+Latency/Q (s),,,84.76,,,
+Total Latency (s),,,1695.11,,,
+Tokens/Q,,,1513,,,
+Examples,,,20,,,
