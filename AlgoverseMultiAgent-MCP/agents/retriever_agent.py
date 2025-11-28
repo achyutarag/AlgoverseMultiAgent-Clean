@@ -1,0 +1,707 @@
+from typing import Dict, Any, List, Optional, Union
+from pydantic import BaseModel, Field
+from langchain.schema import Document
+from langchain_community.vectorstores import FAISS
+from langchain.embeddings.base import Embeddings
+from sentence_transformers import SentenceTransformer
+from .base_agent import BaseAgent, AgentResponse
+import numpy as np
+import json
+import logging
+from pathlib import Path
+import re
+
+logger = logging.getLogger(__name__)
+
+class LocalEmbeddings(Embeddings):
+    """FAISS-compatible wrapper for local embedding models with preprocessing."""
+    
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2", device: str = None):
+        """
+        Initialize the local embedding model.
+        
+        Args:
+            model_name: Name of the SentenceTransformer model to use
+            device: Device to run the model on ('cuda', 'mps', 'cpu')
+        """
+        super().__init__()
+        self.model = SentenceTransformer(model_name, device=device)
+        self.model_name = model_name
+        self.model.eval()
+    
+    def _preprocess_text(self, text: str) -> str:
+        """Preprocess text for better embedding quality."""
+        if not text:
+            return ""
+        
+        # Remove excessive whitespace
+        text = re.sub(r'\s+', ' ', text.strip())
+        
+        # Remove special characters that might hurt embedding quality
+        text = re.sub(r'[^\w\s\.\,\!\?\;\:\-\(\)]', '', text)
+        
+        return text
+    
+    def embed_query(self, text: str) -> List[float]:
+        """Embed a single query with preprocessing."""
+        processed_text = self._preprocess_text(text)
+        embeddings = self.model.encode([processed_text], convert_to_numpy=True)
+        return embeddings[0].tolist()
+    
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        """Embed multiple documents with preprocessing."""
+        if not texts:
+            return []
+        
+        # Preprocess all texts
+        processed_texts = [self._preprocess_text(text) for text in texts]
+        
+        # Return numpy array for FAISS compatibility
+        embeddings = self.model.encode(processed_texts, convert_to_numpy=True)
+        return embeddings.tolist()
+    
+    def __call__(self, texts: Union[str, List[str]]) -> List[List[float]]:
+        """Alias for embed_documents for compatibility."""
+        if isinstance(texts, str):
+            return [self.embed_query(texts)]
+        return self.embed_documents(texts)
+
+class SparseFeatureExtractor:
+    """
+    Extracts sparse feature representations from documents.
+    Features: Structural (S), Existential (E), Relational (R)
+    
+    Creates sparse feature vectors where most dimensions are 0,
+    representing which features are present in each document.
+    """
+    
+    def __init__(self):
+        # Feature keywords for each dimension
+        self.structural_keywords = [
+            "date", "year", "number", "count", "percentage", "ratio", 
+            "measurement", "unit", "amount", "quantity", "how many", 
+            "how much", "when", "time", "age", "size", "length", "width",
+            "capacity", "seated", "population", "inhabitants"
+        ]
+        
+        self.existential_keywords = [
+            "current", "recent", "latest", "new", "now", "today", 
+            "verified", "confirmed", "official", "authoritative",
+            "published", "established", "founded", "created"
+        ]
+        
+        self.relational_keywords = {
+            "compare": ["compare", "difference", "versus", "vs", "better", 
+                       "worse", "similar", "different", "than", "more", "less",
+                       "both", "same", "different", "alike"],
+            "temporal": ["when", "before", "after", "first", "earlier", 
+                        "later", "chronology", "timeline", "during", "since",
+                        "timeframe", "years", "period"],
+            "cause-effect": ["because", "cause", "effect", "result", "led to", 
+                            "due to", "reason", "why", "therefore", "consequently"],
+            "infer": ["how", "would", "could", "should", "predict", "infer", 
+                     "imply", "suggest", "indicate"],
+            "join": ["and", "also", "additionally", "furthermore", "moreover", 
+                    "related", "connected", "associated"]
+        }
+    
+    def extract_sparse_features(self, doc: Document) -> Dict[str, float]:
+        """
+        Extract sparse feature vector from document.
+        
+        Returns:
+            Dictionary with 'structural', 'existential', 'relational' scores (0.0-1.0)
+            and 'relational_types' dict with scores for each relational type
+        """
+        content = doc.page_content.lower()
+        metadata = doc.metadata
+        
+        # Structural features (format/units)
+        structural_score = self._extract_structural_features(content, metadata)
+        
+        # Existential features (trust/recency)
+        existential_score = self._extract_existential_features(content, metadata)
+        
+        # Relational features (relationship types)
+        relational_scores = self._extract_relational_features(content)
+        
+        return {
+            "structural": structural_score,
+            "existential": existential_score,
+            "relational": max(relational_scores.values()) if relational_scores else 0.0,
+            "relational_types": relational_scores  # Sparse: only non-zero types
+        }
+    
+    def _extract_structural_features(self, content: str, metadata: Dict) -> float:
+        """Extract structural feature score."""
+        # Count structural keywords
+        keyword_count = sum(1 for kw in self.structural_keywords if kw in content)
+        
+        # Check for numbers/dates
+        has_numbers = bool(re.search(r'\d+', content))
+        has_dates = bool(re.search(r'\b(19|20)\d{2}\b', content))
+        
+        # Check metadata for structural indicators
+        metadata_structural = 0.0
+        if "year" in metadata or "date" in metadata or "number" in metadata:
+            metadata_structural = 0.3
+        
+        # Normalize to 0-1 (sparse: most docs will be 0-0.3)
+        base_score = min(1.0, keyword_count / 5.0)  # Sparse: few keywords = low score
+        number_boost = 0.2 if has_numbers else 0.0
+        date_boost = 0.2 if has_dates else 0.0
+        
+        return min(1.0, base_score + number_boost + date_boost + metadata_structural)
+    
+    def _extract_existential_features(self, content: str, metadata: Dict) -> float:
+        """Extract existential feature score."""
+        # Count existential keywords
+        keyword_count = sum(1 for kw in self.existential_keywords if kw in content)
+        
+        # Check metadata for recency
+        recency_score = 0.0
+        if "year" in metadata:
+            try:
+                year = int(str(metadata["year"]))
+                # Normalize: recent years (2020+) = high score
+                if year >= 2020:
+                    recency_score = 0.8
+                elif year >= 2010:
+                    recency_score = 0.5
+                elif year >= 2000:
+                    recency_score = 0.3
+            except (ValueError, TypeError):
+                pass
+        
+        # Check for verification indicators
+        verified_score = 0.0
+        if any(kw in content for kw in ["verified", "confirmed", "official", "authoritative"]):
+            verified_score = 0.3
+        
+        # Normalize (sparse: most docs will be 0-0.4)
+        base_score = min(0.4, keyword_count / 3.0)
+        
+        return min(1.0, base_score + recency_score + verified_score)
+    
+    def _extract_relational_features(self, content: str) -> Dict[str, float]:
+        """Extract relational feature scores (sparse: only non-zero types)."""
+        scores = {}
+        
+        for rel_type, keywords in self.relational_keywords.items():
+            keyword_count = sum(1 for kw in keywords if kw in content)
+            if keyword_count > 0:
+                # Sparse: only include if > 0
+                scores[rel_type] = min(1.0, keyword_count / 3.0)
+        
+        return scores  # Sparse dict: only non-zero types
+
+class RetrieverAgent(BaseAgent):
+    """
+    Enhanced Retriever Agent using FAISS for fast, scalable search over large corpora.
+    Implements the MA-RAG retrieval tool with proper preprocessing and embedding.
+    """
+    
+    def __init__(
+        self, 
+        documents: List[Document] = None, 
+        model_config: Optional[Dict[str, Any]] = None,
+        model_name: str = "all-MiniLM-L6-v2",
+        device: str = None,
+        top_k: int = 5,
+        min_similarity: float = 0.2,
+        batch_size: int = 32
+    ):
+        """
+        Initialize the Enhanced Retriever Agent.
+        
+        Args:
+            documents: List of Document objects to create the vector store
+            model_config: Configuration for the embedding model
+            model_name: Name of the local embedding model to use
+            device: Device to run the model on ('cuda', 'mps', 'cpu')
+            top_k: Default number of documents to retrieve
+            min_similarity: Minimum similarity score threshold
+            batch_size: Batch size for embedding processing
+        """
+        super().__init__("retriever_agent", model_config, model_name)
+        
+        # Initialize local embeddings with preprocessing
+        self.embeddings = LocalEmbeddings(
+            model_name=model_name,
+            device=device or ("cuda" if model_config.get("use_cuda", False) else None)
+        )
+        self.vector_store = None
+        self.top_k = top_k
+        self.min_similarity = min_similarity
+        self.batch_size = batch_size
+        
+        # Initialize sparse feature extractor for metadata-guided reranking
+        self.sparse_extractor = SparseFeatureExtractor()
+        self._document_features_cache = {}  # Cache sparse features for performance
+        
+        if documents:
+            self._create_vector_store(documents)
+    
+    def _create_vector_store(self, documents: List[Document]):
+        """Create or update the vector store with the given documents."""
+        if not documents:
+            raise ValueError("No documents provided to create vector store")
+        
+        logger.info(f"Creating vector store with {len(documents)} documents")
+        
+        # Preprocess documents for better retrieval
+        processed_docs = []
+        for doc in documents:
+            # Clean and preprocess document content
+            cleaned_content = self.embeddings._preprocess_text(doc.page_content)
+            
+            # Create new document with cleaned content
+            processed_doc = Document(
+                page_content=cleaned_content,
+                metadata=doc.metadata
+            )
+            processed_docs.append(processed_doc)
+        
+        self.vector_store = FAISS.from_documents(
+            documents=processed_docs,
+            embedding=self.embeddings
+        )
+        
+        logger.info(f"Vector store created successfully with {len(processed_docs)} documents")
+    
+    def add_documents(self, documents: List[Document]):
+        """Add new documents to the vector store."""
+        if not self.vector_store:
+            self._create_vector_store(documents)
+        else:
+            # Preprocess new documents
+            processed_docs = []
+            for doc in documents:
+                cleaned_content = self.embeddings._preprocess_text(doc.page_content)
+                processed_doc = Document(
+                    page_content=cleaned_content,
+                    metadata=doc.metadata
+                )
+                processed_docs.append(processed_doc)
+            
+            self.vector_store.add_documents(processed_docs)
+            logger.info(f"Added {len(processed_docs)} new documents to vector store")
+    
+
+    def _passes_metadata_filters(self, doc: Document, metadata_vector) -> bool:
+        """
+        Check if document passes metadata vector filters.
+        
+        Args:
+            doc: Document to check
+            metadata_vector: MetadataVector instance
+            
+        Returns:
+            True if document passes filters, False otherwise
+        """
+        content = doc.page_content.lower()
+        metadata = doc.metadata
+        
+        # Structural filters (format/units)
+        if metadata_vector.structural > 0.7:
+            # High structural = need numbers, dates, measurements
+            structural_keywords = ["date", "year", "number", "count", "percentage", 
+                                 "ratio", "measurement", "unit", "amount"]
+            if not any(keyword in content for keyword in structural_keywords):
+                # Not a hard filter, just lower priority - we'll let it through but could boost others
+                pass
+        
+        # Existential filters (trust/recency)
+        if metadata_vector.existential > 0.7:
+            # High existential = prefer recent/verified sources
+            # Check metadata for recency indicators
+            if "year" in metadata:
+                try:
+                    year = int(str(metadata["year"]))
+                    if year < 2020:  # Prefer recent sources
+                        return False  # Filter out old sources
+                except (ValueError, TypeError):
+                    pass
+        
+        # Relational filters (relationship type)
+        if metadata_vector.relational_type == "compare":
+            # Comparison queries need comparative language
+            comparison_keywords = ["compare", "difference", "versus", "vs", "better", 
+                                 "worse", "similar", "different", "than", "more", "less"]
+            if not any(keyword in content for keyword in comparison_keywords):
+                # Not a hard filter, but could boost documents with comparison keywords
+                pass
+        
+        elif metadata_vector.relational_type == "temporal":
+            # Temporal queries need dates/timeline info
+            temporal_keywords = ["when", "date", "year", "before", "after", "first", 
+                               "earlier", "later", "chronology", "timeline"]
+            if not any(keyword in content for keyword in temporal_keywords):
+                # Not a hard filter, but prefer documents with temporal info
+                pass
+        
+        elif metadata_vector.relational_type == "cause-effect":
+            # Cause-effect queries need causation language
+            causation_keywords = ["because", "cause", "effect", "result", "led to", 
+                                "due to", "reason", "why", "therefore", "consequently"]
+            if not any(keyword in content for keyword in causation_keywords):
+                # Not a hard filter, but prefer documents with causation language
+                pass
+        
+        # All filters passed (or no hard filters applied)
+        return True
+    
+    def _calculate_metadata_alignment_score(
+        self,
+        doc: Document,
+        doc_features: Dict[str, float],
+        metadata_vector: Any,  # MetadataVector type
+        base_similarity: float
+    ) -> float:
+        """
+        Calculate reranking score using sparse feature alignment with normalization.
+        
+        Uses cosine similarity for dimension alignment (measures alignment, not magnitude)
+        and relational type matching for sparse matching bonus.
+        
+        Args:
+            doc: Document
+            doc_features: Sparse features extracted from document
+            metadata_vector: Query metadata vector
+            base_similarity: Base semantic similarity from FAISS
+            
+        Returns:
+            Reranked score (0.0-1.0)
+        """
+        # Extract query vector
+        query_vector = np.array([
+            metadata_vector.structural,
+            metadata_vector.existential,
+            metadata_vector.relational
+        ])
+        
+        # Extract document sparse features
+        doc_vector = np.array([
+            doc_features.get("structural", 0.0),
+            doc_features.get("existential", 0.0),
+            doc_features.get("relational", 0.0)
+        ])
+        
+        # 1. Cosine similarity for dimension alignment (normalized)
+        # This measures alignment, not magnitude
+        dot_product = np.dot(query_vector, doc_vector)
+        norm_query = np.linalg.norm(query_vector)
+        norm_doc = np.linalg.norm(doc_vector)
+        
+        if norm_query > 0 and norm_doc > 0:
+            dimension_alignment = dot_product / (norm_query * norm_doc)
+        else:
+            dimension_alignment = 0.0
+        
+        # 2. Relational type matching (sparse: only if types match)
+        relational_bonus = 0.0
+        doc_relational_types = doc_features.get("relational_types", {})
+        if metadata_vector.relational_type in doc_relational_types:
+            # Bonus for exact relational type match
+            type_match_score = doc_relational_types[metadata_vector.relational_type]
+            relational_bonus = (
+                metadata_vector.relational * 
+                type_match_score * 
+                0.25  # Up to 25% boost for type match
+            )
+        
+        # 3. Combine: base similarity + dimension alignment + relational bonus
+        # alpha controls how much metadata guidance matters (30% weight)
+        alpha = 0.3
+        reranked_score = (
+            base_similarity * (1 - alpha) +           # 70% base semantic similarity
+            dimension_alignment * alpha +              # 30% feature alignment
+            relational_bonus                           # Additional type match bonus
+        )
+        
+        return min(1.0, reranked_score)
+
+    async def process(self, input_data: Dict[str, Any]) -> AgentResponse:
+        """
+        Process the input sub-query and retrieve relevant documents using FAISS.
+        
+        Args:
+            input_data: Dictionary containing:
+                - 'query': The sub-query to retrieve documents for
+                - 'k': Number of documents to retrieve (default: top_k)
+                - 'min_similarity': Minimum similarity score threshold
+                - 'filter': Filter criteria for the documents
+                - 'include_scores': Whether to include similarity scores (default: True)
+                
+        Returns:
+            AgentResponse containing the retrieved documents and metadata
+        """
+        if not self.vector_store:
+            return AgentResponse(
+                content="Error: No vector store initialized",
+                metadata={"error": "Vector store not initialized"}
+            )
+            
+        query = input_data.get('query', '').strip()
+        if not query:
+            return AgentResponse(
+                content="Error: No query provided",
+                metadata={"error": "No query provided"}
+            )
+            
+        try:
+            # Get retrieval parameters
+            k = min(int(input_data.get('k', self.top_k)), 20)  # Cap at 20 for performance
+            min_similarity = float(input_data.get('min_similarity', self.min_similarity))
+            filter_criteria = input_data.get('filter', {})
+            include_scores = bool(input_data.get('include_scores', True))
+
+            # Extract metadata vector if provided
+            metadata_vector_dict = input_data.get('metadata_vector', {})
+            metadata_vector = None
+            if metadata_vector_dict:
+                from .metadata_vector import MetadataVector
+                try:
+                    metadata_vector = MetadataVector(**metadata_vector_dict)
+                    logger.debug(f"Using metadata vector for reranking: S={metadata_vector.structural:.2f}, "
+                               f"E={metadata_vector.existential:.2f}, "
+                               f"R={metadata_vector.relational:.2f}, "
+                               f"Type={metadata_vector.relational_type}")
+                except Exception as e:
+                    logger.warning(f"Failed to parse metadata vector: {e}")
+                    metadata_vector = None
+            
+            # Log the retrieval request
+            logger.info(f"Retrieving documents for query: {query[:100]}...")
+            logger.debug(f"Parameters: k={k}, min_similarity={min_similarity}")
+            
+            # Expand k if metadata vector is provided (to compensate for reranking)
+            k_expanded = k * 2 if metadata_vector else k
+            k_expanded = min(k_expanded, 30)  # Cap at 30 for performance
+            
+            # Perform similarity search with scores (retrieve more if reranking)
+            docs_and_scores = self.vector_store.similarity_search_with_score(
+                query=query,
+                k=k_expanded,
+                filter=filter_criteria
+            )
+            
+            # Process results with reranking if metadata vector provided
+            if metadata_vector:
+                # Reranking approach: extract sparse features and rerank
+                scored_docs = []
+                
+                for doc, score in docs_and_scores:
+                    # Convert FAISS distance to similarity
+                    base_similarity = 1.0 / (1.0 + score)
+                    
+                    # Skip if below minimum threshold
+                    if base_similarity < min_similarity:
+                        continue
+                    
+                    # Get or extract sparse features
+                    doc_id = doc.metadata.get('id', f"doc_{len(scored_docs)+1}")
+                    if doc_id not in self._document_features_cache:
+                        doc_features = self.sparse_extractor.extract_sparse_features(doc)
+                        self._document_features_cache[doc_id] = doc_features
+                    else:
+                        doc_features = self._document_features_cache[doc_id]
+                    
+                    # Calculate reranked score using sparse feature alignment
+                    reranked_score = self._calculate_metadata_alignment_score(
+                        doc, doc_features, metadata_vector, base_similarity
+                    )
+                    
+                    scored_docs.append((doc, reranked_score, base_similarity, doc_features, doc_id))
+                
+                # Sort by reranked score (descending)
+                scored_docs.sort(key=lambda x: x[1], reverse=True)
+                
+                # Take top k after reranking
+                results = []
+                similarities = []
+                for doc, reranked_score, base_similarity, doc_features, doc_id in scored_docs[:k]:
+                    doc.metadata['id'] = doc_id
+                    
+                    doc_data = {
+                        "id": doc_id,
+                        "page_content": doc.page_content,
+                        "metadata": doc.metadata,
+                        "score": float(reranked_score) if include_scores else None,
+                        "base_similarity": float(base_similarity) if include_scores else None,
+                        "feature_alignment": {
+                            "structural": doc_features.get("structural", 0.0),
+                            "existential": doc_features.get("existential", 0.0),
+                            "relational": doc_features.get("relational", 0.0),
+                            "relational_types": doc_features.get("relational_types", {})
+                        } if include_scores else None
+                    }
+                    results.append(doc_data)
+                    similarities.append(reranked_score)
+                
+                logger.info(f"Reranked {len(scored_docs)} documents, returning top {len(results)}")
+            else:
+                # No metadata vector: use standard processing
+                results = []
+                similarities = []
+                
+                for doc, score in docs_and_scores:
+                    # Convert score to similarity (higher is better)
+                    similarity = 1.0 / (1.0 + score)
+                    
+                    # Skip if below threshold
+                    if similarity < min_similarity:
+                        continue
+                        
+                    # Add document ID if not present
+                    doc_id = doc.metadata.get('id', f"doc_{len(results)+1}")
+                    doc.metadata['id'] = doc_id
+
+                    # Add to results
+                    doc_data = {
+                        "id": doc_id,
+                        "page_content": doc.page_content,
+                        "metadata": doc.metadata,
+                        "score": float(similarity) if include_scores else None
+                    }
+                    results.append(doc_data)
+                    similarities.append(similarity)
+            
+            # Log retrieval results
+            logger.info(f"Retrieved {len(results)} documents with average similarity: "
+                       f"{np.mean(similarities) if similarities else 0:.4f}")
+            
+            # Update history
+            self._update_history("user", f"Retrieve documents for: {query}")
+            self._update_history(
+                "assistant", 
+                f"Retrieved {len(results)} documents "
+                f"(avg similarity: {np.mean(similarities) if similarities else 0:.2f})"
+            )
+            
+            # Prepare response data
+            response_data = {
+                "query": query,
+                "documents": [
+                    {k: v for k, v in doc.items() if k != 'score' or include_scores}
+                    for doc in results
+                ]
+            }
+            
+            if include_scores and similarities:
+                response_data["scores"] = [float(s) for s in similarities]
+            
+            return AgentResponse(
+                content=json.dumps(response_data, ensure_ascii=False),
+                metadata={
+                    "query": query,
+                    "num_documents": len(results),
+                    "average_score": float(np.mean(similarities)) if similarities else 0.0,
+                    "min_score": float(min(similarities)) if similarities else 0.0,
+                    "max_score": float(max(similarities)) if similarities else 0.0,
+                    "retrieval_parameters": {
+                        "k": k,
+                        "k_expanded": k_expanded if metadata_vector else k,
+                        "min_similarity": min_similarity,
+                        "filter": filter_criteria,
+                        "model": self.embeddings.model_name,
+                        "batch_size": self.batch_size,
+                        "metadata_vector_used": metadata_vector.to_dict() if metadata_vector else None,
+                        "reranking_enabled": metadata_vector is not None
+                    },
+                    "documents": results  # Include full document data in metadata
+                }
+            )
+            
+        except Exception as e:
+            error_msg = f"Error retrieving documents: {str(e)}"
+            logger.error(error_msg, exc_info=True)
+            return AgentResponse(
+                content=error_msg,
+                metadata={
+                    "error": str(e),
+                    "error_type": e.__class__.__name__
+                }
+            )
+    
+    def save_index(self, path: Union[str, Path]):
+        """
+        Save the vector store to disk.
+        
+        Args:
+            path: Directory path to save the index
+        """
+        if not self.vector_store:
+            raise ValueError("No vector store to save")
+        
+        path = Path(path)
+        path.mkdir(parents=True, exist_ok=True)
+        self.vector_store.save_local(str(path))
+        
+        # Save model config
+        config = {
+            "model_name": self.embeddings.model_name,
+            "class_name": self.__class__.__name__,
+            "top_k": self.top_k,
+            "min_similarity": self.min_similarity,
+            "batch_size": self.batch_size
+        }
+        with open(path / "config.json", "w") as f:
+            json.dump(config, f)
+        
+        logger.info(f"Vector store saved to {path}")
+    
+    @classmethod
+    def load_index(
+        cls, 
+        path: Union[str, Path], 
+        model_config: Optional[Dict[str, Any]] = None,
+        model_name: Optional[str] = None
+    ) -> 'RetrieverAgent':
+        """
+        Load a vector store from disk.
+        
+        Args:
+            path: Directory path containing the saved index
+            model_config: Configuration for the embedding model
+            model_name: Override the model name from saved config
+            
+        Returns:
+            An instance of RetrieverAgent with the loaded index
+        """
+        path = Path(path)
+        
+        # Load config if exists
+        config_path = path / "config.json"
+        if config_path.exists():
+            with open(config_path, "r") as f:
+                config = json.load(f)
+            model_name = model_name or config.get("model_name", "all-MiniLM-L6-v2")
+            top_k = config.get("top_k", 5)
+            min_similarity = config.get("min_similarity", 0.6)
+            batch_size = config.get("batch_size", 32)
+        else:
+            model_name = model_name or "all-MiniLM-L6-v2"
+            top_k = 5
+            min_similarity = 0.6
+            batch_size = 32
+        
+        # Initialize the agent
+        instance = cls(
+            documents=None,
+            model_config=model_config,
+            model_name=model_name,
+            device=model_config.get("device") if model_config else None,
+            top_k=top_k,
+            min_similarity=min_similarity,
+            batch_size=batch_size
+        )
+        
+        # Load the vector store
+        instance.vector_store = FAISS.load_local(
+            folder_path=str(path),
+            embeddings=instance.embeddings
+        )
+        
+        logger.info(f"Vector store loaded from {path}")
+        return instance
