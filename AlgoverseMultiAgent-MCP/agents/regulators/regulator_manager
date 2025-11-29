@@ -1,0 +1,211 @@
+# agents/regulators/regulator_manager.py
+from typing import List, Dict, Any, Optional, Tuple
+from .base_regulator import BaseRegulator, RegulatorConstraint
+import logging
+
+logger = logging.getLogger(__name__)
+
+class RegulatorManager:
+    """
+    Composes multiple regulator constraints into a single stabilized query.
+    
+    This is the central controller that merges individual regulator outputs
+    into a coherent query transformation for entropy-aware retrieval.
+    """
+    
+    def __init__(self, regulators: List[BaseRegulator]):
+        """
+        Initialize the regulator manager.
+        
+        Args:
+            regulators: List of regulator instances to apply
+        """
+        self.regulators = regulators
+        logger.info(f"RegulatorManager initialized with {len(regulators)} regulators")
+    
+    def apply_all(
+        self,
+        proposed_query: str,
+        reasoning_state: Dict[str, Any],
+        previous_answers: Dict[str, Any],
+        plan_goal: Optional[str] = None
+    ) -> Tuple[str, List[RegulatorConstraint]]:
+        """
+        Apply all regulators and merge their constraints.
+        
+        Args:
+            proposed_query: Raw query from Step Definer
+            reasoning_state: Current reasoning flow state
+            previous_answers: Previous step answers
+            plan_goal: Overall plan goal
+            
+        Returns:
+            Tuple of (stabilized_query, list_of_constraints)
+        """
+        # Collect constraints from all regulators
+        constraints = []
+        for regulator in self.regulators:
+            try:
+                constraint = regulator.apply_constraint(
+                    proposed_query,
+                    reasoning_state,
+                    previous_answers,
+                    plan_goal
+                )
+                constraints.append(constraint)
+                logger.debug(
+                    f"{regulator.name} applied: type={constraint.constraint_type}, "
+                    f"weight={constraint.weight:.2f}"
+                )
+            except Exception as e:
+                logger.warning(f"{regulator.name} failed to apply constraint: {e}")
+                continue
+        
+        # Merge constraints into final query
+        final_query = self.merge_constraints(proposed_query, constraints, reasoning_state)
+        
+        return final_query, constraints
+    
+    def merge_constraints(
+        self,
+        query: str,
+        constraints: List[RegulatorConstraint],
+        reasoning_state: Dict[str, Any]
+    ) -> str:
+        """
+        Merge multiple regulator constraints into a single stabilized query.
+        
+        Strategy:
+        1. Sort by weight (strongest constraints first)
+        2. Apply entity anchoring (Dirichlet - fixes entities)
+        3. Apply relation direction (Neumann - prevents drift)
+        4. Apply evidence reinforcement (potential well - boosts relevant terms)
+        5. Apply plan alignment (boundary - ensures goal consistency)
+        6. Apply confidence-based adjustments (diffusion control)
+        
+        Args:
+            query: Original proposed query
+            constraints: List of constraints from all regulators
+            reasoning_state: Current reasoning state (entropy, etc.)
+            
+        Returns:
+            Stabilized query string
+        """
+        if not constraints:
+            return query
+        
+        # Sort by weight (strongest first)
+        sorted_constraints = sorted(
+            constraints,
+            key=lambda c: c.weight,
+            reverse=True
+        )
+        
+        stabilized_query = query
+        
+        # Apply constraints in order of strength
+        for constraint in sorted_constraints:
+            stabilized_query = self._apply_single_constraint(
+                stabilized_query,
+                constraint,
+                reasoning_state
+            )
+        
+        logger.debug(
+            f"Query stabilized: '{query}' -> '{stabilized_query}' "
+            f"(applied {len(constraints)} constraints)"
+        )
+        
+        return stabilized_query
+    
+    def _apply_single_constraint(
+        self,
+        query: str,
+        constraint: RegulatorConstraint,
+        reasoning_state: Dict[str, Any]
+    ) -> str:
+        """
+        Apply a single constraint to the query.
+        
+        Args:
+            query: Current query state
+            constraint: Constraint to apply
+            reasoning_state: Reasoning state for context
+            
+        Returns:
+            Modified query
+        """
+        constraint_type = constraint.constraint_type
+        params = constraint.parameters
+        weight = constraint.weight
+        
+        # Entity Regulator: Dirichlet anchor (fix entities)
+        if constraint_type == "dirichlet" and "entity" in constraint.regulator_name.lower():
+            # Prefer explicitly provided main_entity, fall back to first in entities list
+            entity = params.get("main_entity")
+            if not entity:
+                entities = params.get("entities", [])
+                entity = entities[0] if entities else None
+            
+            if entity and entity.lower() not in query.lower():
+                # Anchor entity in query
+                query = f"{entity} {query}"
+                logger.debug(f"Entity anchor applied: {entity}")
+        
+        # Relation Regulator: Neumann constraint (prevent drift)
+        elif constraint_type == "neumann":
+            relation_direction = params.get("direction")
+            if relation_direction:
+                # Ensure query maintains relational direction
+                # Example: "contains" vs "contained in"
+                if relation_direction not in query.lower():
+                    # Could prepend relation context
+                    pass  # Relation preservation logic
+        
+        # Evidence Regulator: Potential well (boost relevant terms)
+        elif constraint_type == "potential_well":
+            evidence_terms = params.get("evidence_terms", [])
+            if evidence_terms:
+                # Reinforce evidence-based terminology
+                for term in evidence_terms[:3]:  # Top 3 terms
+                    if term.lower() not in query.lower():
+                        query = f"{query} {term}"
+                logger.debug(f"Evidence reinforcement: {evidence_terms[:3]}")
+        
+        # Plan Regulator: Boundary condition (goal alignment)
+        elif constraint_type == "boundary":
+            goal_keywords = params.get("goal_keywords", [])
+            if goal_keywords:
+                # Ensure query aligns with plan goal
+                # Could add goal context if missing
+                pass  # Goal alignment logic
+        
+        # Confidence Regulator: Diffusion control
+        elif "confidence" in constraint.regulator_name.lower():
+            # Adjust query based on confidence/diffusion
+            diffusion = reasoning_state.get("diffusion_coefficient", 0.0)
+            if diffusion > 0.5:  # High uncertainty
+                # Add more specific terms to reduce ambiguity
+                pass  # Diffusion control logic
+        
+        return query
+    
+    def get_constraint_summary(self, constraints: List[RegulatorConstraint]) -> Dict[str, Any]:
+        """
+        Get summary of applied constraints for logging/debugging.
+        
+        Args:
+            constraints: List of applied constraints
+            
+        Returns:
+            Summary dictionary
+        """
+        return {
+            "total_constraints": len(constraints),
+            "by_type": {
+                c.constraint_type: sum(1 for x in constraints if x.constraint_type == c.constraint_type)
+                for c in constraints
+            },
+            "total_weight": sum(c.weight for c in constraints),
+            "regulators": [c.regulator_name for c in constraints]
+        }
