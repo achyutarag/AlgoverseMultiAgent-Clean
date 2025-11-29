@@ -1,5 +1,5 @@
 # agents/regulators/entity_regulator.py
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from .base_regulator import BaseRegulator, RegulatorConstraint
 import logging
 
@@ -77,6 +77,7 @@ class EntityRegulator(BaseRegulator):
         
         return not has_entity
     
+    
     def _extract_entities(
         self,
         previous_answers: Dict[str, Any],
@@ -92,19 +93,36 @@ class EntityRegulator(BaseRegulator):
             else:
                 answer = str(answer_data)
             
-            # Simple entity extraction (can be enhanced)
-            # Look for capitalized words, proper nouns, etc.
-            words = answer.split()
-            for word in words:
-                # Simple heuristic: capitalized words might be entities
-                if word and word[0].isupper() and len(word) > 2:
-                    # Filter out common words
-                    if word.lower() not in ["the", "and", "or", "for", "with"]:
-                        entities.append(word.strip(".,!?"))
+            # First, try to preserve the full answer if it looks like a single entity
+            # (e.g., "Nuevo Laredo", "New York", "San Francisco")
+            answer_cleaned = answer.strip(".,!?")
+            words = answer_cleaned.split()
+            
+            # If answer is 1-3 capitalized words, treat as a single entity
+            if len(words) <= 3 and all(word and word[0].isupper() for word in words):
+                # Check it's not a common phrase
+                if answer_cleaned.lower() not in ["the", "and", "or", "for", "with"]:
+                    entities.append(answer_cleaned)
+            else:
+                # Extract individual capitalized words
+                for word in words:
+                    if word and word[0].isupper() and len(word) > 2:
+                        if word.lower() not in ["the", "and", "or", "for", "with"]:
+                            entities.append(word.strip(".,!?"))
         
         # Also check reasoning state for entity anchors
         entity_anchors = reasoning_state.get("entity_anchors", {})
         entities.extend(entity_anchors.keys())
         
-        # Deduplicate
-        return list(set(entities))
+        # Deduplicate while preserving order (keep longer entities first)
+        seen = set()
+        unique_entities = []
+        for entity in entities:
+            entity_lower = entity.lower()
+            if entity_lower not in seen:
+                seen.add(entity_lower)
+                unique_entities.append(entity)
+        
+        # Sort by length (longer first) to prefer multi-word entities
+        unique_entities.sort(key=len, reverse=True)
+        return unique_entities

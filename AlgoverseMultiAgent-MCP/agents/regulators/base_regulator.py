@@ -1,6 +1,6 @@
 # agents/regulators/base_regulator.py
 from abc import ABC, abstractmethod
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from pydantic import BaseModel, Field
 import logging
 

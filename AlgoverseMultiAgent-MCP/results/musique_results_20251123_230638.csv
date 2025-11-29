@@ -1,0 +1,14 @@
+Question,Prediction,Ground_Truth,ExactMatch,F1Score,Latency(s),Total_Tokens,Input_Tokens,Output_Tokens
+Who is the spouse of the Green performer?,Unknown,Miquette Giraudy,0.0,0.0,79.42,41388,26206,1867
+Who founded the company that distributed the film UHF?,Unknown,Mike Medavoy,0.0,0.0,81.56,42396,26340,1893
+What administrative territorial entity is the owner of Ciudad Deportiva located?,Nuevo Laredo Municipality,Tamaulipas,0.0,0.0,99.15,34867,15831,2011
+Where is Ulrich Walter's employer headquartered?,Unknown,Cologne,0.0,0.0,59.21,37707,26434,2075
+Which company owns the manufacturer of Learjet 60?,Bombardier Inc,Bombardier Inc.,1.0,1.0,81.70,42739,26399,2669
+
+Summary,,,,,,,,
+Exact Match,,,0.2000,,,,,
+F1 Score,,,0.2000,,,,,
+Latency/Q (s),,,80.21,,,,,
+Total Latency (s),,,401.04,,,,,
+Tokens/Q,,,39819,,,39819,24242,2103
+Examples,,,5,,,,,

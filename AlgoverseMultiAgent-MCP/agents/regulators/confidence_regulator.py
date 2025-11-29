@@ -1,5 +1,5 @@
 # agents/regulators/confidence_regulator.py
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from .base_regulator import BaseRegulator, RegulatorConstraint
 import logging
 

@@ -2,6 +2,7 @@ from typing import Dict, Any, List, Optional, Union
 from pydantic import BaseModel, Field
 import json
 import logging
+import re
 from datetime import datetime
 from collections import defaultdict
 
@@ -348,7 +349,67 @@ class FinalAssembler:
         if not step_answers:
             return "No information found to answer your question."
         
-        # For multi-hop, use the final step answer and extract concise version
+        query_lower = query.lower()
+        
+        # ✅ FIRST PRINCIPLES FIX: Check if question asks for specific administrative level
+        # If question asks for state/province level but answer is municipality, look for state-level answer
+        asks_for_state_level = any(term in query_lower for term in [
+            "administrative territorial entity", "state", "province", 
+            "administrative entity", "territorial entity"
+        ])
+        
+        # Check last step answer level
+        last_answer = step_answers[-1]["answer"]
+        last_answer_lower = last_answer.lower()
+        last_is_municipality = "municipality" in last_answer_lower
+        
+        # If question asks for state but last answer is municipality, search for state-level answer
+        if asks_for_state_level and last_is_municipality:
+            logger.debug(
+                f"Question asks for state/province level but last answer is municipality. "
+                f"Searching through all step answers for state-level answer."
+            )
+            
+            # Look through all step answers for state-level mentions
+            for step_answer in reversed(step_answers):  # Start from most recent
+                answer = step_answer.get("answer", "").lower()
+                # Check if this answer mentions a state (not municipality)
+                if "state" in answer or "province" in answer:
+                    # Extract state name if present
+                    # Look for patterns like "X state" or "state of X" or just "X" (state name)
+                    state_match = re.search(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+state\b', step_answer.get("answer", ""))
+                    if state_match:
+                        state_name = state_match.group(1)
+                        logger.debug(f"Found state-level answer in step: {state_name}")
+                        return self._extract_concise_answer(query, state_name)
+                    
+                    # Also check if answer itself is a state name (common state names)
+                    # Extract capitalized words that might be state names
+                    capitalized_words = re.findall(r'\b([A-Z][a-z]+)\b', step_answer.get("answer", ""))
+                    for word in capitalized_words:
+                        # Common state/province names (can be expanded)
+                        if word not in ["Municipality", "City", "County", "District"]:
+                            # This might be a state name - use it
+                            logger.debug(f"Found potential state name in step answer: {word}")
+                            return self._extract_concise_answer(query, word)
+            
+            # If no state found in step answers, check if we can infer from context
+            # Look for "located in X" or "in X state" patterns in all answers
+            for step_answer in step_answers:
+                answer_text = step_answer.get("answer", "")
+                # Pattern: "X is located in Y" or "X, Y" or "in Y state"
+                location_match = re.search(
+                    r'(?:located in|in)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)(?:\s+state)?',
+                    answer_text,
+                    re.IGNORECASE
+                )
+                if location_match:
+                    potential_state = location_match.group(1)
+                    if "municipality" not in potential_state.lower():
+                        logger.debug(f"Found state-level location in step answer: {potential_state}")
+                        return self._extract_concise_answer(query, potential_state)
+        
+        # Default: use the final step answer and extract concise version
         final_answer = step_answers[-1]["answer"]
         final_answer = self._extract_concise_answer(query, final_answer)
         
@@ -398,8 +459,6 @@ class FinalAssembler:
             # Example: "Are X and Y both Z?" → check if both answers indicate "Z"
             
             # Try to extract the criteria/attribute from the question
-            import re
-            
             # Pattern 1: "Are X and Y both [attribute]?" or "Are X and Y both [criteria]?"
             both_match = re.search(r'both\s+([^?]+)', query_lower)
             if both_match:
@@ -534,7 +593,6 @@ class FinalAssembler:
             # If original question asks for entity name but answer is yes/no, extract from evidence
             if is_entity_name_question and answer.lower().strip() in ["yes", "no"]:
                 # Try to extract entity name from evidence or reasoning
-                import re
                 evidence_text = ""
                 if step_answers[0].get("evidence"):
                     evidence_list = step_answers[0]["evidence"]
@@ -552,7 +610,6 @@ class FinalAssembler:
             
             if is_yes_no_question:
                 # Extract yes/no if present
-                import re
                 answer_lower = answer.lower()
                 yes_no_match = re.search(r'\b(yes|no)\s*\.?\s*$', answer_lower)
                 if yes_no_match:
@@ -569,7 +626,6 @@ class FinalAssembler:
         # If original question asks for entity name but best answer is yes/no, extract from evidence
         if is_entity_name_question and best_answer.get("answer", "").lower().strip() in ["yes", "no"]:
             # Try to extract entity name from evidence or reasoning of best answer or all steps
-            import re
             evidence_text = ""
             if best_answer.get("evidence"):
                 evidence_list = best_answer["evidence"]
@@ -599,7 +655,6 @@ class FinalAssembler:
         
         # For yes/no questions, extract just yes/no
         if is_yes_no_question:
-            import re
             answer_lower = best_answer["answer"].lower()
             yes_no_match = re.search(r'\b(yes|no)\s*\.?\s*$', answer_lower)
             if yes_no_match:
@@ -651,7 +706,6 @@ class FinalAssembler:
         answer_lower = answer.lower()
         
         # Check for numbers
-        import re
         if re.search(r'\d+(?:,\d+)*(?:\.\d+)?', answer):
             return "number"
         
@@ -681,8 +735,6 @@ class FinalAssembler:
         Returns:
             Concise answer (entity name, number, yes/no, etc.)
         """
-        import re
-        
         query_lower = query.lower()
         answer = answer.strip()
         answer_lower = answer.lower()

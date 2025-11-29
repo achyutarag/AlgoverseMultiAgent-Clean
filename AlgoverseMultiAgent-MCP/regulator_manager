@@ -1,0 +1,23 @@
+class RegulatorManager:
+    def __init__(self, regulators: list[BaseRegulator]):
+        self.regulators = regulators
+
+    def apply_all(self, proposed_query, reasoning_state, previous_answers, plan_goal=None):
+        constraints = []
+        for reg in self.regulators:
+            constraints.append(
+                reg.apply_constraint(proposed_query, reasoning_state, previous_answers, plan_goal)
+            )
+
+        # TODO (simple version): combine constraints by weight
+        final_query = self.merge_constraints(proposed_query, constraints)
+        return final_query, constraints
+
+    def merge_constraints(self, query: str, constraints: list[RegulatorConstraint]) -> str:
+        """
+        Apply weighted transformation logic — THIS is where stabilizing_query() will evolve.
+        """
+        for c in sorted(constraints, key=lambda x: x.weight, reverse=True):
+            # later: entity lock, relation rewrite, evidence reinforcement, plan boosting...
+            pass  # currently no-op — but now architecture supports composition
+        return query

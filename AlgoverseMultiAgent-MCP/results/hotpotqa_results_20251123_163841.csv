@@ -1,0 +1,29 @@
+Question,Prediction,Ground_Truth,ExactMatch,F1Score,Latency(s),Total_Tokens,Input_Tokens,Output_Tokens
+Were Scott Derrickson and Ed Wood of the same nationality?,yes,yes,1.0,1.0,42.09,23306,15893,1644
+What government position was held by the woman who portrayed Corliss Archer in the film Kiss and Tell?,Chief of Protocol,Chief of Protocol,1.0,1.0,72.12,45006,29830,2835
+"What science fantasy young adult series, told in first person, has a set of companion books narrating the stories of enslaved worlds and alien species?",Animorphs,Animorphs,1.0,1.0,47.36,26854,17773,2827
+Are the Laleli Mosque and Esma Sultan Mansion located in the same neighborhood?,no,no,1.0,1.0,39.72,35011,28302,2445
+"The director of the romantic comedy ""Big Stone Gap"" is based in what New York city?","Greenwich Village, New York City","Greenwich Village, New York City",1.0,1.0,46.70,36488,27717,2056
+2014 S/S is the debut album of a South Korean boy group that was formed by who?,Entertainment,YG Entertainment,0.0,0.6666666666666666,60.15,40962,28634,3267
+Who was known by his stage name Aladin and helped organizations improve their performance as a consultant?,Eenasul Fateh,Eenasul Fateh,1.0,1.0,21.97,17695,14015,1369
+The arena where the Lewiston Maineiacs played their home games can seat how many people?,"3,677 seated","3,677 seated",1.0,1.0,42.40,37623,29380,2830
+"Who is older, Annie Morton or Terry Richardson?","Based on the analysis, here's a comparison: 1. Find the birth date or age of Annie Morton.: October 8, 1970 2. Find the birth date or age of Terry Richardson.: August 14, 1965 3. Compare the birth date or age of Annie Morton with the birth date or age of Terry Richardson to determine which individual is older.: Terry Richardson, born on August 14, 1965, is older than Annie Morton, born on October 8, 1970. This comparison provides a comprehensive view of the differences and similarities",Terry Richardson,0.0,0.05,45.35,37517,29159,2971
+Are Local H and For Against both from the United States?,yes,yes,1.0,1.0,55.16,41149,30523,3159
+"What is the name of the fight song of the university whose main campus is in Lawrence, Kansas and whose branch campuses are in the Kansas City metropolitan area?",Kansas Song,Kansas Song,1.0,1.0,42.78,24508,15940,1717
+"What screenwriter with credits for ""Evolution"" co-wrote a film starring Nicolas Cage and Téa Leoni?",David Diamond and David Weissman,David Weissman,0.0,0.5714285714285715,75.78,36738,21194,3286
+What year did Guns N Roses perform a promo for a movie starring Arnold Schwarzenegger as a former New York Police detective?,1999,1999,1.0,1.0,63.41,43225,30650,3534
+Are Random House Tower and 888 7th Avenue both used for real estate?,yes,no,0.0,0.0,92.47,50043,30849,4121
+The football manager who recruited David Beckham managed Manchester United during what timeframe?,1986 to 2013,from 1986 to 2013,0.0,0.8571428571428571,60.92,39750,28193,3747
+Brown State Fishing Lake is in a country that has a population of how many inhabitants ?,"9,984","9,984",1.0,1.0,86.68,60702,43143,3835
+The Vermont Catamounts men's soccer team currently competes in a conference that was formerly known as what from 1988 to 1996?,The North Atlantic Conference,the North Atlantic Conference,1.0,1.0,62.34,41514,28977,2559
+Are Giuseppe Verdi and Ambroise Thomas both Opera composers ?,yes,yes,1.0,1.0,36.52,23192,16414,2274
+Roger O. Egeberg was Assistant Secretary for Health and Scientific Affairs during the administration of a president that served during what years?,1969 until 1974,1969 until 1974,1.0,1.0,60.46,42232,29308,2624
+"Which writer was from England, Henry Roth or Robert Erskine Childers?",Robert Erskine Childers,Robert Erskine Childers DSC,0.0,0.8571428571428571,45.19,37549,28864,3352
+
+Summary,,,,,,,,
+Exact Match,,,0.7000,,,,,
+F1 Score,,,0.8501,,,,,
+Latency/Q (s),,,54.98,,,,,
+Total Latency (s),,,1099.57,,,,,
+Tokens/Q,,,37053,,,37053,26238,2823
+Examples,,,20,,,,,

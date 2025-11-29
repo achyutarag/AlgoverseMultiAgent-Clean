@@ -42,6 +42,7 @@ class RegulatorManager:
         Returns:
             Tuple of (stabilized_query, list_of_constraints)
         """
+        
         # Collect constraints from all regulators
         constraints = []
         for regulator in self.regulators:
@@ -61,10 +62,17 @@ class RegulatorManager:
                 logger.warning(f"{regulator.name} failed to apply constraint: {e}")
                 continue
         
-        # Merge constraints into final query
-        final_query = self.merge_constraints(proposed_query, constraints, reasoning_state)
+        # Sort constraints by weight (descending - highest weight first)
+        sorted_constraints = sorted(
+            constraints,
+            key=lambda c: c.weight,
+            reverse=True
+        )
         
-        return final_query, constraints
+        # Merge constraints into final query
+        final_query = self.merge_constraints(proposed_query, sorted_constraints, reasoning_state)
+        
+        return final_query, sorted_constraints
     
     def merge_constraints(
         self,
@@ -139,6 +147,7 @@ class RegulatorManager:
         params = constraint.parameters
         weight = constraint.weight
         
+        
         # Entity Regulator: Dirichlet anchor (fix entities)
         if constraint_type == "dirichlet" and "entity" in constraint.regulator_name.lower():
             # Prefer explicitly provided main_entity, fall back to first in entities list
@@ -147,10 +156,22 @@ class RegulatorManager:
                 entities = params.get("entities", [])
                 entity = entities[0] if entities else None
             
-            if entity and entity.lower() not in query.lower():
-                # Anchor entity in query
-                query = f"{entity} {query}"
-                logger.debug(f"Entity anchor applied: {entity}")
+            if entity:
+                # Check if entity (or its parts) is already in query
+                entity_lower = entity.lower()
+                query_lower = query.lower()
+                
+                # Check if full entity or all its words are in query
+                entity_words = entity_lower.split()
+                entity_in_query = (
+                    entity_lower in query_lower or
+                    all(word in query_lower for word in entity_words)
+                )
+                
+                if not entity_in_query:
+                    # Anchor entity in query (prepend for visibility)
+                    query = f"{entity} {query}"
+                    logger.debug(f"Entity anchor applied: {entity}")
         
         # Relation Regulator: Neumann constraint (prevent drift)
         elif constraint_type == "neumann":
@@ -172,13 +193,18 @@ class RegulatorManager:
                         query = f"{query} {term}"
                 logger.debug(f"Evidence reinforcement: {evidence_terms[:3]}")
         
+        
+        
         # Plan Regulator: Boundary condition (goal alignment)
         elif constraint_type == "boundary":
             goal_keywords = params.get("goal_keywords", [])
             if goal_keywords:
-                # Ensure query aligns with plan goal
-                # Could add goal context if missing
-                pass  # Goal alignment logic
+                # Add goal keywords to query if missing to help retrieval
+                query_lower = query.lower()
+                for keyword in goal_keywords[:5]:  # Top 5 keywords (increased from 3)
+                    if keyword.lower() not in query_lower:
+                        query = f"{query} {keyword}"
+                        logger.debug(f"Added goal keyword to query: {keyword}")
         
         # Confidence Regulator: Diffusion control
         elif "confidence" in constraint.regulator_name.lower():

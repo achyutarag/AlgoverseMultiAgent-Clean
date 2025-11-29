@@ -16,7 +16,6 @@ from .final_assembler import FinalAssembler
 from .tokenization_utils import TokenizationUtils
 from .tokenization_utils import tokenization_utils
 from .mcp_reasoning_state import mcp_state_manager
-from .metadata_vector import metadata_vector_generator
 from .mcp_reasoning_state import MCPReasoningStateManager
 
 logger = logging.getLogger(__name__)
@@ -262,12 +261,16 @@ class MARAGOrchestrator:
         
         step_results = []
         
+        # Get main query from plan for diffusion-aware retrieval
+        main_query = plan.get("query") or plan.get("disambiguated_query") or ""
+        
         for i, step in enumerate(ordered_steps):
             try:
                 logger.info(f"Executing step {i+1}/{len(ordered_steps)}: {step.get('id', 'unknown')}")
                 
                 # Execute single step following MA-RAG sequence
-                step_result = await self._execute_single_step(step, plan)
+                # Pass hop number (i+1) and main query for diffusion-aware retrieval
+                step_result = await self._execute_single_step(step, plan, hop=i+1, plan_goal=main_query)
                 
                 # Update state with step result
                 await self.state_manager.add_step_result(step["id"], step_result)
@@ -300,17 +303,25 @@ class MARAGOrchestrator:
         logger.info(f"Completed {len(step_results)} steps")
         return step_results
     
-    async def _execute_single_step(self, step: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
+    async def _execute_single_step(
+        self, 
+        step: Dict[str, Any], 
+        plan: Dict[str, Any],
+        hop: int = 1,
+        plan_goal: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
         Execute a single step following MA-RAG sequence:
         1. Step Definer → subqueries
-        2. Retrieval Tool → documents
+        2. Diffusion-Aware Retrieval → documents (with stabilization, entropy tracking, anchors)
         3. Extractor Agent → evidence
         4. QA Agent → answer
         
         Args:
             step: The current step to execute
             plan: The overall plan
+            hop: Current hop number (for entropy tracking and reasoning flow)
+            plan_goal: Main query/goal (for plan alignment regulator)
             
         Returns:
             Step execution result
@@ -320,30 +331,6 @@ class MARAGOrchestrator:
             history = await self.state_manager.get_accumulated_history()
             previous_answers = await self.state_manager.get_previous_answers()
 
-            # New: Generate metadata vector from MCP state for this step
-            mcp_state = mcp_state_manager.get_state(self.current_execution_id)
-            if mcp_state:
-                metadata_vector = metadata_vector_generator.generate_from_mcp_state(
-                    mcp_state=mcp_state,
-                    step=step
-                )
-                logger.debug(f"Step {step['id']}: Generated metadata vector - "
-                           f"S={metadata_vector.structural:.2f}, "
-                           f"E={metadata_vector.existential:.2f}, "
-                           f"R={metadata_vector.relational:.2f}, "
-                           f"Type={metadata_vector.relational_type}")
-            else:
-                # Fallback if MCP state not available
-                logger.warning(f"No MCP state found, using default metadata vector")
-                from .metadata_vector import MetadataVector
-                metadata_vector = MetadataVector(
-                    structural=0.5,
-                    existential=0.6,
-                    relational=0.5,
-                    relational_type="factual",
-                    query_type="unknown"
-                )
-            
             # 1. Step Definer Agent
             logger.debug(f"Step {step['id']}: Executing Step Definer...")
             step_definer_input = {
@@ -364,54 +351,152 @@ class MARAGOrchestrator:
             
             # Check if this step has a direct answer (no retrieval needed)
             if subqueries and len(subqueries) == 1 and subqueries[0].get("direct_answer"):
-                logger.info(f"Step {step['id']} has direct answer from previous steps, skipping retrieval")
                 direct_answer = subqueries[0].get("direct_answer", "")
                 
-                # Structure qa_result to match what final assembler expects
-                qa_result = {
-                    "answer": direct_answer,
-                    "confidence": 1.0,
-                    "sources": ["previous_step"],
-                    "supporting_evidence": []
-                }
+                # ✅ FIRST PRINCIPLES FIX: Validate direct_answer using diffusion-aware components
+                # This prevents accepting incomplete answers (e.g., municipality when state is needed)
+                should_skip_retrieval = True
+                validation_reason = ""
                 
-                # Update MCP state after step completes
-                step_result_dict = {
-                    "step_id": step["id"],
-                    "answer": direct_answer,
-                    "sources": ["previous_step"],
-                    "confidence": 1.0
-                }
+                if plan_goal and self.state_manager.regulator_manager:
+                    try:
+                        # Update flow state to get reasoning context
+                        flow_snapshot = self.state_manager._update_flow_state(
+                            hop=hop,
+                            previous_answers=previous_answers,
+                            plan_goal=plan_goal
+                        )
+                        
+                        # Find PlanRegulator to check alignment
+                        plan_reg = None
+                        for regulator in self.state_manager.regulator_manager.regulators:
+                            if hasattr(regulator, 'name') and 'plan' in regulator.name.lower():
+                                plan_reg = regulator
+                                break
+                        
+                        if plan_reg and flow_snapshot:
+                            # Check if direct_answer aligns with plan goal
+                            # Use the step description as the "proposed query" to check alignment
+                            step_description = step.get("description", "")
+                            
+                            # Convert flow_snapshot to dict if needed
+                            if hasattr(flow_snapshot, 'model_dump'):
+                                reasoning_state = flow_snapshot.model_dump()
+                            elif hasattr(flow_snapshot, 'dict'):
+                                reasoning_state = flow_snapshot.dict()
+                            else:
+                                reasoning_state = {}
+                            
+                            constraint = plan_reg.apply_constraint(
+                                proposed_query=step_description,  # Check if step aligns with goal
+                                reasoning_state=reasoning_state,
+                                previous_answers=previous_answers,
+                                plan_goal=plan_goal
+                            )
+                            
+                            alignment = constraint.parameters.get("alignment", 1.0)
+                            
+                            # Check for hierarchical level mismatch
+                            # If plan asks for "administrative territorial entity" (state/province)
+                            # but answer is a municipality, that's a level mismatch
+                            plan_lower = plan_goal.lower()
+                            answer_lower = direct_answer.lower()
+                            step_lower = step_description.lower()
+                            
+                            asks_for_state_level = any(term in plan_lower for term in [
+                                "administrative territorial entity", "state", "province", 
+                                "administrative entity", "territorial entity"
+                            ])
+                            answer_is_municipality = "municipality" in answer_lower
+                            
+                            # If plan asks for state-level but answer is municipality, that's wrong
+                            if asks_for_state_level and answer_is_municipality:
+                                should_skip_retrieval = False
+                                validation_reason = (
+                                    f"Hierarchical level mismatch: plan asks for state/province level "
+                                    f"but direct_answer is municipality '{direct_answer}'. "
+                                    f"Need to retrieve state information."
+                                )
+                            # If alignment is very low, the answer might be incomplete
+                            elif alignment < 0.3:
+                                should_skip_retrieval = False
+                                validation_reason = (
+                                    f"Low plan alignment ({alignment:.2f}) for direct_answer "
+                                    f"'{direct_answer}'. Proceeding with retrieval to verify."
+                                )
+                            else:
+                                validation_reason = (
+                                    f"Direct answer '{direct_answer}' validated: "
+                                    f"alignment={alignment:.2f}, level check passed"
+                                )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to validate direct_answer with diffusion-aware components: {e}. "
+                            f"Proceeding with retrieval to be safe."
+                        )
+                        should_skip_retrieval = False
+                        validation_reason = f"Validation error: {e}"
                 
-                mcp_state_manager.update_state(
-                    step_id=step["id"],
-                    step_result=step_result_dict,
-                    execution_id=self.current_execution_id
-                )
-                
-                # Skip retrieval and extraction, go directly to QA with the direct answer
-                step_result = {
-                    "step_id": step['id'],
-                    "step_description": step.get("description", ""),
-                    "subqueries": subqueries,
-                    "retrieved_documents": [],  # No documents retrieved
-                    "extracted_passages": [{
-                        "text": direct_answer,
-                        "document_id": "previous_step",
-                        "chunk_id": "direct_answer",
-                        "relevance": 1.0,
-                        "reasoning": "Answer extracted directly from previous step results",
-                        "source_context": "Previous step answer"
-                    }],
-                    "qa_result": qa_result,  # Match structure expected by final assembler
-                    "success": True,
-                    "direct_answer": True,
-                    "timestamp": datetime.now().isoformat()
-                }
-                
-                # Update state and return
-                await self.state_manager.add_step_result(step['id'], step_result)
-                return step_result
+                # Only skip retrieval if validation passed
+                if should_skip_retrieval:
+                    logger.info(
+                        f"Step {step['id']} has validated direct answer from previous steps, "
+                        f"skipping retrieval. {validation_reason}"
+                    )
+                    
+                    # Structure qa_result to match what final assembler expects
+                    qa_result = {
+                        "answer": direct_answer,
+                        "confidence": 1.0,
+                        "sources": ["previous_step"],
+                        "supporting_evidence": []
+                    }
+                    
+                    # Update MCP state after step completes
+                    step_result_dict = {
+                        "step_id": step["id"],
+                        "answer": direct_answer,
+                        "sources": ["previous_step"],
+                        "confidence": 1.0
+                    }
+                    
+                    mcp_state_manager.update_state(
+                        step_id=step["id"],
+                        step_result=step_result_dict,
+                        execution_id=self.current_execution_id
+                    )
+                    
+                    # Skip retrieval and extraction, go directly to QA with the direct answer
+                    step_result = {
+                        "step_id": step['id'],
+                        "step_description": step.get("description", ""),
+                        "subqueries": subqueries,
+                        "retrieved_documents": [],  # No documents retrieved
+                        "extracted_passages": [{
+                            "text": direct_answer,
+                            "document_id": "previous_step",
+                            "chunk_id": "direct_answer",
+                            "relevance": 1.0,
+                            "reasoning": "Answer extracted directly from previous step results",
+                            "source_context": "Previous step answer"
+                        }],
+                        "qa_result": qa_result,  # Match structure expected by final assembler
+                        "success": True,
+                        "direct_answer": True,
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    
+                    # Update state and return
+                    await self.state_manager.add_step_result(step['id'], step_result)
+                    return step_result
+                else:
+                    # Validation failed - proceed with retrieval
+                    logger.warning(
+                        f"Step {step['id']}: Direct answer validation failed. {validation_reason} "
+                        f"Proceeding with diffusion-aware retrieval."
+                    )
+                    # Clear direct_answer flag so we proceed with normal retrieval flow
+                    subqueries[0].pop("direct_answer", None)
             
             if not subqueries:
                 # For simple steps, use the step description as a single query
@@ -423,59 +508,127 @@ class MARAGOrchestrator:
                     "priority": 1
                 }]
             
-            # 2. Retrieval Tool (for each subquery)
-            logger.debug(f"Step {step['id']}: Executing retrieval for {len(subqueries)} subqueries...")
+            # 2. Diffusion-Aware Retrieval (for each subquery)
+            # ✅ NEW: Uses stabilize_and_retrieve() which includes:
+            #   - Query stabilization via regulators
+            #   - Entropy tracking and diffusion awareness
+            #   - Reasoning flow updates
+            #   - Early termination checks
+            #   - Anchor corrections
+            logger.debug(f"Step {step['id']}: Executing diffusion-aware retrieval for {len(subqueries)} subqueries...")
             all_retrieved_docs = []
             seen_doc_ids = set()  # Track seen document IDs for deduplication
+            early_terminated = False
             
             for subquery in subqueries:
-
-                
-                # Don't use metadata filters as FAISS filters (documents don't have these fields)
-                # Metadata filtering happens AFTER retrieval in retriever_agent
-                
-                retrieval_input = {
-                    "query": subquery["query"],
-                    "k": getattr(self.retriever, 'top_k', 10),
-                    "min_similarity": 0.3,
-                    "metadata_vector": metadata_vector.to_dict(),
-                    "filter": {}  # ✅ Empty filter - let FAISS return all matches
-                }
-                
-                retrieval_response = await self.retriever.process(retrieval_input)
-                self._extract_and_aggregate_token_usage(retrieval_response)
-                if retrieval_response.metadata.get("error"):
-                    logger.warning(f"Retrieval failed for subquery: {subquery['query']}")
-                    continue
-                
-                # Use metadata first (more efficient, already a list)
-                docs_from_metadata = retrieval_response.metadata.get("documents", [])
-                
-                if docs_from_metadata:
+                try:
+                    # Use diffusion-aware retrieval with stabilization
+                    # Get main query from plan if plan_goal not provided
+                    main_query = plan_goal or plan.get("query") or plan.get("disambiguated_query") or ""
+                    retrieval_result = await self.state_manager.stabilize_and_retrieve(
+                        proposed_query=subquery["query"],
+                        hop=hop,
+                        previous_answers=previous_answers,
+                        plan_goal=main_query,
+                        retriever_agent=self.retriever
+                    )
+                    
+                    # Check for early termination
+                    if retrieval_result.get("direct_answer"):
+                        logger.info(f"Step {step['id']}: Early termination triggered - entropy low, confidence high")
+                        early_terminated = True
+                        # Use the direct answer as the result
+                        direct_answer = retrieval_result.get("answer", "")
+                        confidence = retrieval_result.get("confidence", 0.9)
+                        
+                        # Structure result for early termination
+                        step_result = {
+                            "step_id": step['id'],
+                            "step_description": step.get("description", ""),
+                            "subqueries": subqueries,
+                            "retrieved_documents": [],
+                            "extracted_passages": [{
+                                "text": direct_answer,
+                                "document_id": "early_termination",
+                                "chunk_id": "direct_answer",
+                                "relevance": confidence,
+                                "reasoning": retrieval_result.get("reasoning", "Early termination based on entropy and confidence"),
+                                "source_context": "Early termination"
+                            }],
+                            "qa_result": {
+                                "answer": direct_answer,
+                                "confidence": confidence,
+                                "sources": ["early_termination"],
+                                "supporting_evidence": []
+                            },
+                            "success": True,
+                            "early_termination": True,
+                            "stabilized_query": retrieval_result.get("stabilized_query", subquery["query"]),
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        
+                        # Update state and return early termination result
+                        await self.state_manager.add_step_result(step['id'], step_result)
+                        return step_result
+                    
+                    # Normal retrieval - get documents from stabilized retrieval
+                    docs_from_retrieval = retrieval_result.get("documents", [])
+                    stabilized_query = retrieval_result.get("stabilized_query", subquery["query"])
+                    
+                    logger.debug(
+                        f"Step {step['id']}: Stabilized query '{subquery['query']}' → '{stabilized_query}'. "
+                        f"Retrieved {len(docs_from_retrieval)} documents"
+                    )
+                    
                     # Deduplicate by document ID and add to collection
-                    for doc in docs_from_metadata:
+                    for doc in docs_from_retrieval:
                         doc_id = doc.get("id") or doc.get("metadata", {}).get("id")
                         if doc_id and doc_id not in seen_doc_ids:
                             seen_doc_ids.add(doc_id)
                             all_retrieved_docs.append(doc)
                         elif not doc_id:
-                            # If no ID, use content hash or add anyway
+                            # If no ID, add anyway (will be deduplicated by content if needed)
                             all_retrieved_docs.append(doc)
-                else:
-                    # Fallback to JSON parsing if metadata not available
+                    
+                    # Log regulator constraints if available
+                    constraints = retrieval_result.get("constraints", [])
+                    if constraints:
+                        constraint_names = []
+                        for c in constraints:
+                            if isinstance(c, dict):
+                                constraint_names.append(c.get('regulator_name', 'unknown'))
+                            elif hasattr(c, 'regulator_name'):
+                                constraint_names.append(c.regulator_name)
+                        logger.debug(
+                            f"Step {step['id']}: Applied {len(constraints)} regulator constraints "
+                            f"({', '.join(constraint_names)})"
+                        )
+                    
+                except Exception as e:
+                    logger.warning(f"Diffusion-aware retrieval failed for subquery '{subquery['query']}': {e}")
+                    # Fallback to direct retrieval if stabilize_and_retrieve fails
                     try:
-                        clean_retrieval = TokenizationUtils.strip_markdown_json(retrieval_response.content)
-                        retrieved_docs = json.loads(clean_retrieval)
-                        docs_from_json = retrieved_docs.get("documents", [])
-                        for doc in docs_from_json:
+                        retrieval_input = {
+                            "query": subquery["query"],
+                            "k": getattr(self.retriever, 'top_k', 10),
+                            "min_similarity": getattr(self.retriever, 'min_similarity', 0.3),
+                            "filter": {}
+                        }
+                        retrieval_response = await self.retriever.process(retrieval_input)
+                        self._extract_and_aggregate_token_usage(retrieval_response)
+                        
+                        if retrieval_response.metadata.get("error"):
+                            logger.warning(f"Fallback retrieval also failed for subquery: {subquery['query']}")
+                            continue
+                        
+                        docs_from_metadata = retrieval_response.metadata.get("documents", [])
+                        for doc in docs_from_metadata:
                             doc_id = doc.get("id") or doc.get("metadata", {}).get("id")
                             if doc_id and doc_id not in seen_doc_ids:
                                 seen_doc_ids.add(doc_id)
                                 all_retrieved_docs.append(doc)
-                            elif not doc_id:
-                                all_retrieved_docs.append(doc)
-                    except (json.JSONDecodeError, Exception) as e:
-                        logger.warning(f"Failed to parse retriever response for subquery '{subquery['query']}': {e}")
+                    except Exception as fallback_error:
+                        logger.error(f"Fallback retrieval failed: {fallback_error}")
                         continue
             
             if not all_retrieved_docs:
@@ -592,7 +745,6 @@ class MARAGOrchestrator:
                 "retrieved_documents": all_retrieved_docs,
                 "extracted_passages": extracted_passages,
                 "qa_result": qa_result,
-                "metadata_vector": metadata_vector.to_dict(),
                 "success": True,
                 "timestamp": datetime.now().isoformat()
                 

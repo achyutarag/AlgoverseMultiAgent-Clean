@@ -62,7 +62,8 @@ async def stabilize_and_retrieve(
             "direct_answer": True,
             "answer": last_answer.get("answer", "") if isinstance(last_answer, dict) else str(last_answer),
             "confidence": flow_snapshot.confidence,
-            "reasoning": "Entropy low, confidence high - early termination valid"
+            "reasoning": "Entropy low, confidence high - early termination valid",
+            "stabilized_query": stabilized_query  # Include stabilized query even in early termination
         }
     
     # 4. Entropy-aware retrieval
@@ -109,8 +110,8 @@ async def _entropy_aware_retrieve(
     
     logger.debug(
         f"Entropy-aware retrieval: query='{stabilized_query}', "
-        f"H(t)={flow_snapshot.entropy:.3f if flow_snapshot else 0.0}, "
-        f"D(t)={flow_snapshot.diffusion_coefficient:.3f if flow_snapshot else 0.0}, "
+        f"H(t)={(flow_snapshot.entropy if flow_snapshot else 0.0):.3f}, "
+        f"D(t)={(flow_snapshot.diffusion_coefficient if flow_snapshot else 0.0):.3f}, "
         f"documents={len(result.metadata.get('documents', []))}"
     )
     
