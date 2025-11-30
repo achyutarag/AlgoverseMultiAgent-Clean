@@ -124,6 +124,28 @@ class FinalAssembler:
             
             logger.info("Final answer assembly completed successfully")
             
+            # ====================================================================
+            # COLLECT CONVERGENCE METADATA FOR DIFFUSION PROCESS
+            # ====================================================================
+            # Extract entropy trajectory, drift trajectory, and anchors from steps
+            entropy_trajectory = []
+            drift_trajectory = []
+            confidence_trajectory = []
+            all_anchors = []
+            
+            for step in processed_steps:
+                qa_result = step.get("qa_result", {})
+                diffusion_meta = qa_result.get("diffusion_metadata", {})
+                if diffusion_meta:
+                    entropy_trajectory.append(diffusion_meta.get("entropy", 0.5))
+                    drift_trajectory.append(diffusion_meta.get("diffusion_coefficient", 0.5))
+                    confidence_trajectory.append(diffusion_meta.get("confidence", 0.5))
+                    all_anchors.extend(diffusion_meta.get("new_anchors", []))
+            
+            # Calculate stability score (1 - max_drift)
+            max_drift = max(drift_trajectory) if drift_trajectory else 0.5
+            stability_score = 1.0 - max_drift
+            
             return {
                 "final_answer": final_answer_obj.final_answer,
                 "confidence": final_answer_obj.confidence,
@@ -132,7 +154,21 @@ class FinalAssembler:
                 "step_summaries": final_answer_obj.step_summaries,
                 "evidence_quality": final_answer_obj.evidence_quality,
                 "metadata": final_answer_obj.execution_metadata,
-                "structured_answer": final_answer_obj.dict()
+                "structured_answer": final_answer_obj.dict(),
+                # ✅ CONVERGENCE METADATA (Diffusion-to-Convergence Model)
+                "convergence_metadata": {
+                    "entropy_trajectory": entropy_trajectory,
+                    "drift_trajectory": drift_trajectory,
+                    "confidence_trajectory": confidence_trajectory,
+                    "anchors_used": all_anchors,
+                    "stability_score": stability_score,
+                    "convergence_detected": (
+                        len(entropy_trajectory) >= 2 and
+                        entropy_trajectory[-1] < entropy_trajectory[0] and
+                        (drift_trajectory[-1] < drift_trajectory[0] if len(drift_trajectory) >= 2 else True) and
+                        (confidence_trajectory[-1] > confidence_trajectory[0] if len(confidence_trajectory) >= 2 else True)
+                    )
+                }
             }
             
         except Exception as e:
@@ -311,7 +347,8 @@ class FinalAssembler:
             elif query_type == "comparative":
                 final_answer = await self._synthesize_comparative_answer(main_query, step_answers)
             elif query_type == "multi-hop":
-                final_answer = await self._synthesize_multihop_answer(main_query, step_answers)
+                # Pass processed_steps for convergence estimation (entropy trajectory, anchors)
+                final_answer = await self._synthesize_multihop_answer(main_query, step_answers, processed_steps)
             elif query_type == "analytical":
                 final_answer = await self._synthesize_analytical_answer(main_query, step_answers)
             else:
@@ -344,76 +381,245 @@ class FinalAssembler:
         synthesis += "This comparison provides a comprehensive view of the differences and similarities."
         return synthesis
     
-    async def _synthesize_multihop_answer(self, query: str, step_answers: List[Dict[str, Any]]) -> str:
-        """Synthesize answer for multi-hop questions."""
+    async def _synthesize_multihop_answer(
+        self, 
+        query: str, 
+        step_answers: List[Dict[str, Any]], 
+        processed_steps: List[Dict[str, Any]] = None
+    ) -> str:
+        """
+        Synthesize answer for multi-hop questions using convergence estimation.
+        
+        ====================================================================
+        CONVERGENCE ESTIMATION MODEL (NOT A SUMMARIZER)
+        ====================================================================
+        The Final Assembler is a CONVERGENCE ESTIMATOR, not a summarizer.
+        It performs fixed-point convergence of the diffusion process:
+        
+        1. MONITOR ENTROPY TRAJECTORY:
+           - Track H(t) across hops: if H(t) ↓ and D(t) ↓ and confidence ↑
+           - Convergence condition: |P(t+1) - P(t)| < ε → fixed point reached
+           - Early termination: if entropy decreasing, drift stable, confidence increasing
+        
+        2. MERGE ANSWER CANDIDATES:
+           - Final answer = argmax(P_final) where:
+             P_final = P_raw + α·anchor_consistency - β·drift + γ·evidence_density
+           - Candidates are ranked by P_final (highest first)
+           - Answers are stabilized under anchors (potential wells)
+        
+        3. REWARD ANCHOR CONSISTENCY:
+           - Answers consistent with anchors get higher P_final
+           - Cross-hop drift is penalized
+           - Evidence density is rewarded
+        
+        This completes the diffusion → compression → convergence cycle.
+        ====================================================================
+        
+        Args:
+            query: The original question
+            step_answers: List of answers from each hop
+            processed_steps: Full step results with diffusion metadata (optional)
+        """
         if not step_answers:
             return "No information found to answer your question."
         
         query_lower = query.lower()
         
-        # ✅ FIRST PRINCIPLES FIX: Check if question asks for specific administrative level
-        # If question asks for state/province level but answer is municipality, look for state-level answer
-        asks_for_state_level = any(term in query_lower for term in [
-            "administrative territorial entity", "state", "province", 
-            "administrative entity", "territorial entity"
-        ])
+        # ====================================================================
+        # 1. MONITOR ENTROPY TRAJECTORY ACROSS HOPS
+        # ====================================================================
+        # Track H(t), D(t), and confidence across the diffusion process
+        entropy_trajectory = []
+        drift_trajectory = []
+        confidence_trajectory = []
+        all_anchors = []
         
-        # Check last step answer level
-        last_answer = step_answers[-1]["answer"]
-        last_answer_lower = last_answer.lower()
-        last_is_municipality = "municipality" in last_answer_lower
+        if processed_steps:
+            for step in processed_steps:
+                qa_result = step.get("qa_result", {})
+                diffusion_meta = qa_result.get("diffusion_metadata", {})
+                if diffusion_meta:
+                    entropy_trajectory.append(diffusion_meta.get("entropy", 0.5))
+                    drift_trajectory.append(diffusion_meta.get("diffusion_coefficient", 0.5))
+                    confidence_trajectory.append(diffusion_meta.get("confidence", 0.5))
+                    all_anchors.extend(diffusion_meta.get("new_anchors", []))
         
-        # If question asks for state but last answer is municipality, search for state-level answer
-        if asks_for_state_level and last_is_municipality:
+        # Check convergence condition: if H(t) ↓ and D(t) ↓ and confidence ↑
+        convergence_detected = False
+        if len(entropy_trajectory) >= 2:
+            entropy_trend = entropy_trajectory[-1] - entropy_trajectory[0]
+            drift_trend = drift_trajectory[-1] - drift_trajectory[0] if len(drift_trajectory) >= 2 else 0
+            confidence_trend = confidence_trajectory[-1] - confidence_trajectory[0] if len(confidence_trajectory) >= 2 else 0
+            
+            # Convergence: entropy decreasing, drift stable/decreasing, confidence increasing
+            if entropy_trend < -0.1 and drift_trend < 0.1 and confidence_trend > 0.1:
+                convergence_detected = True
+                logger.info(
+                    f"✅ Convergence: H(t)↓{entropy_trend:.2f}, D(t)↓{drift_trend:.2f}, conf↑{confidence_trend:.2f}"
+                )
+        
+        # ====================================================================
+        # 2. MERGE ANSWER CANDIDATES WITH ANCHOR CONSISTENCY
+        # ====================================================================
+        # Calculate P_final for each candidate using convergence formula:
+        # P_final = P_raw + α·anchor_consistency - β·drift + γ·evidence_density
+        answer_candidates = []
+        for i, step_answer in enumerate(step_answers):
+            answer = step_answer.get("answer", "")
+            confidence = step_answer.get("confidence", 0.5)
+            
+            # Get diffusion metadata if available
+            step_meta = {}
+            if processed_steps and i < len(processed_steps):
+                qa_result = processed_steps[i].get("qa_result", {})
+                step_meta = qa_result.get("diffusion_metadata", {})
+            
+            anchor_consistency = step_meta.get("anchor_consistency", 0.5)
+            entropy = step_meta.get("entropy", 0.5)
+            diffusion = step_meta.get("diffusion_coefficient", 0.5)
+            
+            # Calculate P_final using convergence formula
+            alpha = 0.3  # Weight for anchor consistency (reward consistency)
+            beta = 0.2   # Weight for drift penalty (penalize drift)
+            gamma = 0.2  # Weight for evidence density (reward evidence)
+            
+            # P_raw is the base confidence
+            p_raw = confidence
+            
+            # Evidence density (simplified: based on number of sources)
+            sources = step_answer.get("sources", [])
+            evidence_density = min(1.0, len(sources) / 5.0)  # Normalize to [0, 1]
+            
+            # P_final = P_raw + α·anchor_consistency - β·drift + γ·evidence_density
+            p_final = (
+                p_raw +
+                alpha * anchor_consistency -
+                beta * diffusion +
+                gamma * evidence_density
+            )
+            # Clamp to [0, 1]
+            p_final = max(0.0, min(1.0, p_final))
+            
+            answer_candidates.append({
+                "answer": answer,
+                "p_final": p_final,
+                "p_raw": p_raw,
+                "anchor_consistency": anchor_consistency,
+                "drift": diffusion,
+                "evidence_density": evidence_density,
+                "entropy": entropy,
+                "hop": i + 1
+            })
+        
+        # Sort by P_final (highest first) - this is argmax(P_final)
+        answer_candidates.sort(key=lambda x: x["p_final"], reverse=True)
+        
+        # ✅ CONCISE: Only log top 3 candidates with essential info
+        logger.debug(f"Convergence ranking (top 3 by P_final):")
+        for i, candidate in enumerate(answer_candidates[:3]):
             logger.debug(
-                f"Question asks for state/province level but last answer is municipality. "
-                f"Searching through all step answers for state-level answer."
+                f"  [{i+1}] P_final={candidate['p_final']:.3f} | "
+                f"answer='{candidate['answer'][:40]}...' | "
+                f"anchor_cons={candidate['anchor_consistency']:.2f} | "
+                f"drift={candidate['drift']:.2f}"
+            )
+        
+        # ====================================================================
+        # 3. REWARD ANCHOR CONSISTENCY (Hierarchical Level Detection)
+        # ====================================================================
+        # Generalized hierarchical level correction using GranularityRegulator
+        # instead of hardcoded location terms. Works for any hierarchical domain.
+        from .regulators.granularity_regulator import GranularityRegulator
+        granularity_reg = GranularityRegulator()
+        required_domain, required_level = granularity_reg._infer_required_level(query)
+        
+        # Get best candidate based on P_final (convergence estimation)
+        best_candidate = answer_candidates[0] if answer_candidates else None
+        if not best_candidate:
+            return "No information found to answer your question."
+        
+        best_answer = best_candidate["answer"]
+        best_answer_lower = best_answer.lower()
+        
+        # ====================================================================
+        # HIERARCHICAL LEVEL CORRECTION (Anchor Consistency Enhancement)
+        # ====================================================================
+        # If question requires a specific hierarchical level but best answer
+        # violates it, search for correct-level answer with higher anchor consistency
+        if required_domain and required_level:
+            # Classify best answer's hierarchical level
+            answer_domain, answer_level, _ = granularity_reg.classify_entity_level(best_answer)
+            
+            # Check if best answer violates required level
+            is_violation = granularity_reg.is_level_violation(
+                required_domain, required_level,
+                answer_domain, answer_level
             )
             
-            # Look through all step answers for state-level mentions
-            for step_answer in reversed(step_answers):  # Start from most recent
-                answer = step_answer.get("answer", "").lower()
-                # Check if this answer mentions a state (not municipality)
-                if "state" in answer or "province" in answer:
-                    # Extract state name if present
-                    # Look for patterns like "X state" or "state of X" or just "X" (state name)
-                    state_match = re.search(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+state\b', step_answer.get("answer", ""))
-                    if state_match:
-                        state_name = state_match.group(1)
-                        logger.debug(f"Found state-level answer in step: {state_name}")
-                        return self._extract_concise_answer(query, state_name)
-                    
-                    # Also check if answer itself is a state name (common state names)
-                    # Extract capitalized words that might be state names
-                    capitalized_words = re.findall(r'\b([A-Z][a-z]+)\b', step_answer.get("answer", ""))
-                    for word in capitalized_words:
-                        # Common state/province names (can be expanded)
-                        if word not in ["Municipality", "City", "County", "District"]:
-                            # This might be a state name - use it
-                            logger.debug(f"Found potential state name in step answer: {word}")
-                            return self._extract_concise_answer(query, word)
-            
-            # If no state found in step answers, check if we can infer from context
-            # Look for "located in X" or "in X state" patterns in all answers
-            for step_answer in step_answers:
-                answer_text = step_answer.get("answer", "")
-                # Pattern: "X is located in Y" or "X, Y" or "in Y state"
-                location_match = re.search(
-                    r'(?:located in|in)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)(?:\s+state)?',
-                    answer_text,
-                    re.IGNORECASE
+            if is_violation:
+                logger.debug(
+                    f"Hierarchical mismatch: query requires {required_domain}/{required_level}, "
+                    f"best answer is {answer_domain}/{answer_level}. Searching for correct-level answer..."
                 )
-                if location_match:
-                    potential_state = location_match.group(1)
-                    if "municipality" not in potential_state.lower():
-                        logger.debug(f"Found state-level location in step answer: {potential_state}")
-                        return self._extract_concise_answer(query, potential_state)
+                
+                # Look for correct-level answers in candidates (prioritize anchor consistency)
+                required_keywords = granularity_reg._get_level_keywords(required_domain, required_level)
+                for candidate in answer_candidates:
+                    candidate_domain, candidate_level, _ = granularity_reg.classify_entity_level(candidate["answer"])
+                    
+                    # Check if candidate matches required level
+                    if (candidate_domain == required_domain and 
+                        candidate_level == required_level and
+                        candidate["anchor_consistency"] > 0.3):
+                        logger.info(
+                            f"✅ Found correct-level answer: '{candidate['answer']}' "
+                            f"({required_domain}/{required_level}, anchor_cons={candidate['anchor_consistency']:.2f})"
+                        )
+                        return self._extract_concise_answer(query, candidate["answer"])
+                
+                # Also search raw evidence if available (from processed_steps)
+                if processed_steps:
+                    for step in processed_steps:
+                        extracted_passages = step.get("extracted_passages", [])
+                        for passage in extracted_passages:
+                            passage_text = passage.get("text", "") if isinstance(passage, dict) else str(passage)
+                            if not passage_text:
+                                continue
+                            
+                            # Look for entities at required level in passage
+                            # Use keyword matching to find potential matches
+                            passage_lower = passage_text.lower()
+                            has_required_keywords = any(
+                                keyword in passage_lower 
+                                for keyword in required_keywords
+                            )
+                            
+                            if has_required_keywords:
+                                # Extract capitalized words/phrases that might be the entity
+                                # This is a heuristic - in practice, QA agent should handle this
+                                entity_pattern = r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b'
+                                matches = re.findall(entity_pattern, passage_text)
+                                for match in matches:
+                                    # Check if match is at required level
+                                    match_domain, match_level, _ = granularity_reg.classify_entity_level(match)
+                                    if match_domain == required_domain and match_level == required_level:
+                                        logger.info(
+                                            f"✅ Found correct-level entity in evidence: {match} "
+                                            f"({required_domain}/{required_level})"
+                                        )
+                                        return self._extract_concise_answer(query, match)
         
-        # Default: use the final step answer and extract concise version
-        final_answer = step_answers[-1]["answer"]
-        final_answer = self._extract_concise_answer(query, final_answer)
-        
-        return final_answer
+        # ====================================================================
+        # RETURN BEST CANDIDATE (Fixed Point Convergence)
+        # ====================================================================
+        # Return the answer with highest P_final (converged fixed point)
+        final_answer = best_candidate["answer"]
+        logger.info(
+            f"✅ Converged: '{final_answer[:50]}...' "
+            f"(P_final={best_candidate['p_final']:.3f}, "
+            f"anchor_cons={best_candidate['anchor_consistency']:.2f})"
+        )
+        return self._extract_concise_answer(query, final_answer)
     
     async def _synthesize_analytical_answer(self, query: str, step_answers: List[Dict[str, Any]]) -> str:
         """Synthesize answer for analytical questions."""
