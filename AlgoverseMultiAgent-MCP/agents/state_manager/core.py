@@ -51,6 +51,7 @@ class StateManager:
             from ..entropy_tracker import EntropyTracker
             from ..reasoning_flow import ReasoningFlowIndex
             from ..regulators.regulator_manager import RegulatorManager
+            from ..regulators.granularity_regulator import GranularityRegulator
             from ..regulators.entity_regulator import EntityRegulator
             from ..regulators.relation_regulator import RelationRegulator
             from ..regulators.evidence_regulator import EvidenceRegulator
@@ -64,7 +65,11 @@ class StateManager:
             self.reasoning_flow = ReasoningFlowIndex(entropy_tracker=self.entropy_tracker)
             
             # Initialize regulators
+            # ✅ GranularityRegulator FIRST - Initial Condition (u(x,0))
+            # This sets the correct hierarchical level before retrieval begins,
+            # preventing hierarchical leakage and level-mismatch cascades
             regulators = [
+                GranularityRegulator(weight=1.0),  # FIRST - initial condition
                 EntityRegulator(weight=0.9),
                 RelationRegulator(weight=0.8),
                 EvidenceRegulator(weight=0.85),
