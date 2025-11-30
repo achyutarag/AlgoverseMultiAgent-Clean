@@ -52,12 +52,14 @@ def load_musique_example_context_as_documents(
     for para_idx, paragraph_item in enumerate(paragraphs):
         # Handle both string and dict formats
         if isinstance(paragraph_item, dict):
-            # MuSiQue paragraphs are dictionaries with keys like 'idx', 'title', 'text', etc.
-            # Extract the text content - try common field names
-            paragraph_text = paragraph_item.get('text', 
+            # ✅ FIRST PRINCIPLES FIX: MuSiQue paragraphs use 'paragraph_text' field, not 'text'
+            # Check 'paragraph_text' FIRST (the actual field name in MuSiQue JSON)
+            # This prevents extracting document titles instead of actual paragraph content
+            paragraph_text = paragraph_item.get('paragraph_text',
+                          paragraph_item.get('text', 
                           paragraph_item.get('content', 
                           paragraph_item.get('paragraph',
-                          paragraph_item.get('title', str(paragraph_item)))))
+                          paragraph_item.get('title', str(paragraph_item))))))
             
             # Get paragraph index from dict if available, otherwise use enumerate index
             para_idx_from_dict = paragraph_item.get('idx', para_idx)
@@ -238,10 +240,26 @@ def load_musique_context_as_documents(
             
         paragraphs = example.get('paragraphs', [])
         
+        # ✅ FIRST PRINCIPLES FIX: Handle paragraphs as dictionaries (not strings)
+        # MuSiQue paragraphs are dictionaries with 'paragraph_text', 'title', 'idx', etc.
         # Create a document for each paragraph
-        for para_idx, paragraph_text in enumerate(paragraphs):
+        for para_idx, paragraph_item in enumerate(paragraphs):
+            # Handle both string and dict formats
+            if isinstance(paragraph_item, dict):
+                # ✅ FIX: Check 'paragraph_text' FIRST (the actual field name in MuSiQue JSON)
+                paragraph_text = paragraph_item.get('paragraph_text',
+                                  paragraph_item.get('text',
+                                  paragraph_item.get('content',
+                                  paragraph_item.get('paragraph',
+                                  paragraph_item.get('title', str(paragraph_item))))))
+                para_idx_from_dict = paragraph_item.get('idx', para_idx)
+            else:
+                # If it's already a string, use it directly
+                paragraph_text = str(paragraph_item)
+                para_idx_from_dict = para_idx
+            
             # Create a unique ID for this paragraph
-            para_id = f"{example.get('id', i)}_{para_idx}"
+            para_id = f"{example.get('id', i)}_{para_idx_from_dict}"
             
             # Skip if we've already processed this exact paragraph
             if para_id in processed_paragraphs:
@@ -251,7 +269,7 @@ def load_musique_context_as_documents(
             # Create metadata
             metadata = {
                 "source": "musique",
-                "paragraph_id": para_idx,
+                "paragraph_id": para_idx_from_dict,
                 "paragraph_unique_id": para_id,
                 "dataset_split": dataset_split,
                 "example_id": example.get('id', 'unknown')
@@ -259,7 +277,7 @@ def load_musique_context_as_documents(
             
             if include_metadata:
                 supporting_facts = example.get('supporting_facts', [])
-                is_supporting = para_idx in supporting_facts if isinstance(supporting_facts, list) else False
+                is_supporting = para_idx_from_dict in supporting_facts if isinstance(supporting_facts, list) else False
                 
                 metadata.update({
                     "is_supporting_fact": is_supporting,
@@ -269,7 +287,7 @@ def load_musique_context_as_documents(
             
             # Create Document object
             doc = Document(
-                page_content=paragraph_text,
+                page_content=paragraph_text,  # Now correctly extracts paragraph_text field
                 metadata=metadata
             )
             documents.append(doc)
