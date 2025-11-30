@@ -31,3 +31,6 @@
 20251123_174115 - HotpotQA - 20 examples - EM: 0.7500, F1: 0.8452
 20251123_181356 - HotpotQA - 20 examples - EM: 0.7500, F1: 0.8262
 20251123_191600 - HotpotQA - 20 examples - EM: 0.8000, F1: 0.8762
+20251130_013450 - MuSiQue - 5 examples - EM: 0.2000, F1: 0.2000
+20251130_121830 - MuSiQue - 5 examples - EM: 0.2000, F1: 0.2000
+20251130_131433 - MuSiQue - 5 examples - EM: 0.0000, F1: 0.0000
