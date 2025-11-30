@@ -77,16 +77,131 @@ Return a JSON object with this structure:
 }
 
 **IMPORTANT**: Always return valid JSON. Do not include any text before or after the JSON object."""
+    
+    def _attempt_hierarchical_inference(
+        self,
+        question: str,
+        context: List[Dict[str, Any]],
+        required_domain: Optional[str],
+        required_level: Optional[str]
+    ) -> Optional[str]:
+        """
+        Attempt to infer parent-level entity when evidence contains lower-level entities.
+        
+        ✅ FIRST PRINCIPLES: When documents contain lower-level entities but query requires
+        higher-level, we should infer the parent entity from context rather than returning "unknown".
+        
+        This is generalized and works for any hierarchical domain (territorial, organizational, taxonomic).
+        
+        Args:
+            question: The question being answered
+            context: List of extracted passages/evidence
+            required_domain: Required hierarchical domain
+            required_level: Required hierarchical level name
+            
+        Returns:
+            Inferred parent entity name if found, None otherwise
+        """
+        if not required_domain or not required_level:
+            return None
+        
+        try:
+            from .regulators.granularity_regulator import GranularityRegulator
+            granularity_reg = GranularityRegulator()
+            
+            # Get required level number
+            required_level_num = granularity_reg.get_level_number(required_domain, required_level)
+            if not required_level_num:
+                return None
+            
+            # Get level keywords for the required level
+            level_keywords = granularity_reg._get_level_keywords(required_domain, required_level)
+            if not level_keywords:
+                return None
+            
+            # Search context for entities at required level
+            # Look for patterns where entities are mentioned with required level keywords
+            import re
+            for evidence_item in context:
+                evidence_text = evidence_item.get("text", "") if isinstance(evidence_item, dict) else str(evidence_item)
+                if not evidence_text:
+                    continue
+                
+                evidence_lower = evidence_text.lower()
+                
+                # Check if evidence contains required level keywords
+                for keyword in level_keywords:
+                    keyword_lower = keyword.lower()
+                    if keyword_lower in evidence_lower:
+                        # Try to extract entity name near the keyword
+                        # Pattern: look for capitalized words/phrases near the keyword
+                        # This works for patterns like "X is in Y state" or "Y state contains X"
+                        patterns = [
+                            # Pattern 1: "Entity [keyword]" or "[keyword] Entity"
+                            rf'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+{re.escape(keyword_lower)}\b',
+                            rf'\b{re.escape(keyword_lower)}\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b',
+                            # Pattern 2: "Entity, [keyword]" or "[keyword], Entity"
+                            rf'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*),\s*{re.escape(keyword_lower)}\b',
+                            rf'\b{re.escape(keyword_lower)},\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b',
+                            # Pattern 3: "X is in Y [keyword]" or "Y [keyword] contains X"
+                            rf'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+{re.escape(keyword_lower)}\s+(?:contains|has|owns|governs)',
+                            rf'\b(?:located|situated|found)\s+in\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+{re.escape(keyword_lower)}\b',
+                        ]
+                        
+                        for pattern in patterns:
+                            matches = re.findall(pattern, evidence_text, re.IGNORECASE)
+                            if matches:
+                                # Return the first match (most likely the parent entity)
+                                inferred = matches[0].strip()
+                                # Validate it's not a common word
+                                if inferred and len(inferred) > 2 and inferred.lower() not in ["the", "a", "an", "this", "that"]:
+                                    logger.debug(
+                                        f"QA Agent: Hierarchical inference found '{inferred}' "
+                                        f"using pattern with keyword '{keyword}'"
+                                    )
+                                    return inferred
+        except Exception as e:
+            logger.debug(f"QA Agent: Hierarchical inference failed: {str(e)}")
+        
+        return None
 
 
     async def process(self, input_data: Dict[str, Any]) -> AgentResponse:
         """
-        Generate a step-specific answer using in-context learning with provided evidence.
+        Generate a step-specific answer using entropy-aware compression in a stabilized belief field.
+        
+        ====================================================================
+        DIFFUSION-TO-CONVERGENCE MODEL:
+        ====================================================================
+        Multi-hop reasoning is modeled as a diffusion process where beliefs
+        P(x,t) spread through document space. This QA agent performs the
+        compression step that collapses probability mass into anchors:
+        
+        P(x,t+1) = compress(P(x,t), anchors, H(t), D(t))
+        
+        Where:
+        - P(x,t): Belief distribution at hop t
+        - anchors: Fixed points (potential wells) from previous hops
+        - H(t): Entropy (uncertainty measure)
+        - D(t): Diffusion coefficient (drift measure)
+        
+        Compression Strategy:
+        - High entropy (H(t) > 0.5): Low compression → explore evidence broadly
+        - Low entropy (H(t) < 0.3) + high confidence: High compression → collapse to anchors
+        - Medium entropy: Balanced compression
+        
+        The output becomes new anchors for the next hop, completing the
+        diffusion → compression → anchor cycle.
+        ====================================================================
         
         Args:
             input_data: Dictionary containing:
                 - 'question': The subquery to answer
                 - 'context': List of extracted passages with their sources and relevance
+                - 'flow_snapshot': FlowSnapshot with H(t), D(t), anchors, beliefs (NEW)
+                - 'regulator_constraints': List of regulator constraints (NEW)
+                - 'stabilized_query': The stabilized query used for retrieval (NEW)
+                - 'hop': Current hop number (NEW)
                 - Optional 'history': Previous interactions for context
                 - Optional 'step_context': Information about the current step
                 - Optional 'overall_query': The main question being answered
@@ -95,10 +210,17 @@ Return a JSON object with this structure:
                 - Optional 'min_confidence': Minimum confidence threshold (0.0-1.0)
                 
         Returns:
-            AgentResponse containing the synthesized answer and metadata
+            AgentResponse containing:
+                - Synthesized answer (collapsed probability mass)
+                - New anchors for next hop
+                - Diffusion metadata (entropy, diffusion, anchor consistency)
         """
         question = input_data.get('question', '').strip()
         context = input_data.get('context', [])
+        flow_snapshot = input_data.get('flow_snapshot')
+        regulator_constraints = input_data.get('regulator_constraints', [])
+        stabilized_query = input_data.get('stabilized_query', '')
+        hop = input_data.get('hop', 1)
         history = input_data.get('history', [])
         step_context = input_data.get('step_context', {})
         overall_query = input_data.get('overall_query', '')
@@ -106,9 +228,72 @@ Return a JSON object with this structure:
         max_history = int(input_data.get('max_history_items', 4))
         min_confidence = max(0.0, min(1.0, float(input_data.get('min_confidence', 0.0))))
         
-
-        max_history = int(input_data.get('max_history_items', 4))
-        min_confidence = max(0.0, min(1.0, float(input_data.get('min_confidence', 0.0))))
+        # ====================================================================
+        # EXTRACT DIFFUSION STATE FROM STABILIZED BELIEF FIELD
+        # ====================================================================
+        # Extract entropy H(t), diffusion D(t), confidence, and anchors
+        # These determine the compression strategy
+        if flow_snapshot:
+            if isinstance(flow_snapshot, dict):
+                entropy = flow_snapshot.get('entropy', 0.5)
+                diffusion = flow_snapshot.get('diffusion_coefficient', 0.5)
+                confidence = flow_snapshot.get('confidence', 0.5)
+                anchors = flow_snapshot.get('anchors', [])
+                entity_anchors = flow_snapshot.get('entity_anchors', {})
+            else:
+                # FlowSnapshot object
+                entropy = flow_snapshot.entropy if hasattr(flow_snapshot, 'entropy') else 0.5
+                diffusion = flow_snapshot.diffusion_coefficient if hasattr(flow_snapshot, 'diffusion_coefficient') else 0.5
+                confidence = flow_snapshot.confidence if hasattr(flow_snapshot, 'confidence') else 0.5
+                anchors = flow_snapshot.anchors if hasattr(flow_snapshot, 'anchors') else []
+                entity_anchors = flow_snapshot.entity_anchors if hasattr(flow_snapshot, 'entity_anchors') else {}
+        else:
+            # Fallback if no flow_snapshot (backward compatibility)
+            entropy = 0.5
+            diffusion = 0.5
+            confidence = 0.5
+            anchors = []
+            entity_anchors = {}
+        
+        # ====================================================================
+        # EXTRACT HIERARCHICAL LEVEL REQUIREMENT (Initial Condition)
+        # ====================================================================
+        # Extract hierarchical level requirement from GranularityRegulator constraint
+        # This is the initial condition (u(x,0)) that must be respected during compression
+        required_hierarchical_level = None
+        required_domain = None
+        for constraint in regulator_constraints:
+            constraint_dict = constraint if isinstance(constraint, dict) else constraint.dict() if hasattr(constraint, 'dict') else {}
+            constraint_name = constraint_dict.get('regulator_name', '')
+            if 'granularity' in constraint_name.lower():
+                params = constraint_dict.get('parameters', {})
+                required_level = params.get('required_level')
+                required_domain = params.get('required_domain')
+                if required_level:
+                    required_hierarchical_level = required_level
+                    break
+        
+        # ====================================================================
+        # ENTROPY-AWARE COMPRESSION DECISION
+        # ====================================================================
+        # Compression level determines how much to collapse probability mass:
+        # - High compression: Low entropy + high confidence → collapse to anchors
+        # - Medium compression: Moderate uncertainty → balanced approach
+        # - Low compression: High entropy → explore evidence broadly
+        if entropy < 0.3 and confidence > 0.7:
+            compression_level = "high"
+            compression_strategy = "Collapse probability mass to most anchor-consistent answer. High precision, low exploration."
+        elif entropy < 0.5:
+            compression_level = "medium"
+            compression_strategy = "Balance anchor consistency with evidence exploration."
+        else:
+            compression_level = "low"
+            compression_strategy = "Explore evidence broadly while maintaining anchor consistency."
+        
+        logger.debug(
+            f"QA Agent (Hop {hop}): Entropy={entropy:.3f}, Diffusion={diffusion:.3f}, "
+            f"Confidence={confidence:.3f}, Compression={compression_level}"
+        )
         
         # Normalize question for consistent processing
         question = tokenization_utils.normalize_query(question)
@@ -150,15 +335,107 @@ Return a JSON object with this structure:
             )
         
         try:
-            # Prepare the enhanced prompt with step-specific context (preprocess for LLM)
+            # ====================================================================
+            # BUILD PROMPT WITH STABILIZED BELIEF FIELD CONTEXT
+            # ====================================================================
+            # The prompt includes diffusion state (H(t), D(t)), anchors, and constraints
+            # to guide entropy-aware compression
             prompt = f"""{self.system_prompt}
             
+### ====================================================================
+### DIFFUSION-AWARE CONTEXT (Stabilized Belief Field)
+### ====================================================================
+### Current Hop: {hop}
+### Entropy H(t): {entropy:.3f} ({'Low uncertainty' if entropy < 0.3 else 'Medium uncertainty' if entropy < 0.5 else 'High uncertainty'})
+### Diffusion D(t): {diffusion:.3f} ({'Low drift' if diffusion < 0.3 else 'Medium drift' if diffusion < 0.5 else 'High drift'})
+### Confidence: {confidence:.3f}
+### Compression Level: {compression_level.upper()}
+### Active Anchors: {len(anchors)} bucket anchors, {len(entity_anchors)} entity-specific anchors
+
+### Stabilized Query Used for Retrieval:
+{stabilized_query if stabilized_query else question}
+### ====================================================================
+
 ### Subquery to Answer:
 {tokenization_utils.preprocess_llm_input(question)}
 
 ### Step Context:
 {json.dumps(step_context, indent=2) if step_context else "No specific step context"}
 """
+            
+            # Add anchor context for consistency (potential wells)
+            if anchors or entity_anchors:
+                prompt += "\n\n### ===================================================================="
+                prompt += "\n### ACTIVE ANCHORS (Fixed Points - Maintain Consistency)"
+                prompt += "\n### ===================================================================="
+                prompt += "\n**Anchors are fixed points (potential wells) that stabilize reasoning.**"
+                prompt += "\nYour answer should be consistent with these anchors to prevent drift.\n"
+                
+                for anchor in (anchors if isinstance(anchors, list) else []):
+                    anchor_entity = anchor.get('entity', '') if isinstance(anchor, dict) else (anchor.entity if hasattr(anchor, 'entity') else '')
+                    anchor_type = anchor.get('type', '') if isinstance(anchor, dict) else (anchor.type if hasattr(anchor, 'type') else '')
+                    if anchor_entity:
+                        prompt += f"- {anchor_entity} ({anchor_type})\n"
+                
+                for entity, anchor_data in (entity_anchors.items() if isinstance(entity_anchors, dict) else []):
+                    prompt += f"- {entity}: {str(anchor_data)[:100]}\n"
+                
+                prompt += "\n**CRITICAL**: Your answer must be consistent with these anchors.\n"
+                prompt += "If multiple answers exist, choose the one that aligns with anchors.\n"
+            
+            # Add regulator constraints (boundary conditions)
+            if regulator_constraints:
+                prompt += "\n### ===================================================================="
+                prompt += "\n### REGULATOR CONSTRAINTS (Boundary Conditions)"
+                prompt += "\n### ===================================================================="
+                prompt += "\n**Constraints from regulators guide reasoning boundaries.**\n"
+                for constraint in regulator_constraints[:3]:  # Top 3 constraints
+                    constraint_name = constraint.get('regulator_name', '') if isinstance(constraint, dict) else (constraint.regulator_name if hasattr(constraint, 'regulator_name') else '')
+                    constraint_type = constraint.get('constraint_type', '') if isinstance(constraint, dict) else (constraint.constraint_type if hasattr(constraint, 'constraint_type') else '')
+                    if constraint_name:
+                        prompt += f"- {constraint_name} ({constraint_type})\n"
+                prompt += "\n"
+            
+            # ✅ FIRST PRINCIPLES: Hierarchical Level Awareness in Entropy-Aware Compression
+            # ====================================================================
+            # The global boundary condition and initial condition (u(x,0)) sets the required hierarchical level.
+            # Entropy-aware compression must respect this constraint to minimize
+            # ambiguity. If evidence contains entities at different hierarchical
+            # levels, compress to the entity at the REQUIRED level.
+            # ====================================================================
+            
+
+            if required_hierarchical_level:
+                prompt += "\n### ===================================================================="
+                prompt += "\n### HIERARCHICAL LEVEL CONSTRAINT (Initial Condition - MUST RESPECT)"
+                prompt += "\n### ===================================================================="
+                prompt += f"\n**CRITICAL**: The query requires a {required_hierarchical_level} level entity"
+                if required_domain:
+                    prompt += f" (domain: {required_domain})"
+                prompt += ".\n\n**Entropy-Aware Compression Rule**:"
+                prompt += "\n- If evidence contains entities at DIFFERENT hierarchical levels, "
+                prompt += f"extract the entity at the {required_hierarchical_level} level (required level)."
+                prompt += "\n- DO NOT extract entities at wrong hierarchical levels."
+                prompt += "\n- This minimizes entropy by ensuring the answer respects the initial condition constraint."
+                prompt += "\n\n**How to Identify Entities at Required Level**:"
+                prompt += "\n- **KEY INSIGHT**: The entity name itself doesn't need to contain level keywords"
+                prompt += "\n- Look for entities mentioned WITH the required level keywords in the evidence"
+                prompt += "\n- Example: If state/province level is required and evidence says 'X Municipality is located in Y state' → Extract 'Y' (mentioned with 'state' keyword)"
+                prompt += "\n- Example: If state/province level is required and evidence says 'Y is the administrative territorial entity containing X' → Extract 'Y' (mentioned with 'administrative territorial entity')"
+                prompt += "\n- Example: If state/province level is required and evidence says 'City Municipality, State Name' → Extract 'State Name' (the one without municipality keyword)"
+                prompt += "\n- **Pattern Recognition**: Entities described with required level keywords (even if the entity name itself lacks those keywords) are at that level"
+                prompt += "\n\n**General Principle**:"
+                prompt += "\n- Hierarchical structures have levels (e.g., country > state > municipality, "
+                prompt += "company > division > team, kingdom > phylum > species, etc.)"
+                prompt += "\n- If the query requires level X, extract entities at level X, not level Y (higher or lower)."
+                prompt += "\n- When evidence contains multiple entities at different levels, identify which is at the required level by looking at how they're described in the evidence."
+                prompt += "\n\n**Examples (Generic Patterns)**:"
+                prompt += "\n- Evidence contains 'Entity A (lower level), Entity B (higher level)' → Extract Entity B if higher level is required"
+                prompt += "\n- Evidence contains 'Entity A (higher level), Entity B (lower level)' → Extract Entity A if higher level is required"
+                prompt += "\n- Evidence contains 'X is located in Y' where Y is described with required level keywords → Extract Y"
+                prompt += "\n- Evidence contains 'X is part of Y' where Y is described with required level keywords → Extract Y"
+                prompt += "\n\n**This is entropy-aware compression**: Compressing evidence to the correct hierarchical level "
+                prompt += "minimizes ambiguity (min H(final answer; evidence)) while respecting the initial condition.\n"
             
             # Add overall query context prominently at the top (if available)
             if overall_query:
@@ -231,6 +508,59 @@ Using the question and evidence provided above:
 - Example: Subquery "Who founded YG Entertainment?" Evidence mentions "YG Entertainment" but doesn't mention founder → Answer: "unknown" (founder not found, which is what was asked)
 - Only return "unknown" if the SPECIFIC information asked for is not in the evidence
 
+**✅ CRITICAL: Hierarchical Level Awareness (Entropy-Aware Compression)**
+- If a hierarchical level constraint is specified above (e.g., "state_province" level required), you MUST extract the entity at that level
+- This is entropy-aware compression: min H(final answer; evidence) while respecting the initial condition constraint
+- If evidence contains entities at DIFFERENT hierarchical levels, extract the entity at the REQUIRED level (not a different level)
+- **IMPORTANT**: If evidence only contains entities at the WRONG hierarchical level (e.g., municipality when state is required), 
+  you may return "unknown" for THIS step, but the system will continue searching in other documents
+- **However**: If evidence contains BOTH wrong-level and correct-level entities, extract the correct-level entity
+- Examples (Generic Patterns):
+  * If higher level is required and evidence says "Lower-Level Entity, Higher-Level Entity" → Extract "Higher-Level Entity" (required level)
+  * If higher level is required and evidence says "X is located in Y [higher-level term]" → Extract "Y" (higher level)
+  * If lower level is required and evidence says "Lower-Level Entity, Higher-Level Entity" → Extract "Lower-Level Entity" (required level)
+  * For territorial hierarchies: If state/province level required and evidence says "City Municipality, State Name" → Extract "State Name"
+  * For organizational hierarchies: If company level required and evidence says "Department Name, Company Name" → Extract "Company Name"
+  * For taxonomic hierarchies: If genus level required and evidence says "Species Name (Genus Name)" → Extract "Genus Name"
+- This ensures compression respects the global boundary condition as well as the initial condition (u(x,0)) set by GranularityRegulator
+- DO NOT extract entities at wrong hierarchical levels - this violates the constraint and increases entropy
+
+### ====================================================================
+### ENTROPY-AWARE COMPRESSION INSTRUCTIONS
+### ====================================================================
+**You are collapsing probability mass P(x,t) into anchors for the next hop.**
+
+Compression Level: {compression_level.upper()}
+Strategy: {compression_strategy}
+
+**Key Principle**: You are NOT just extracting an answer. You are:
+1. Collapsing the probability distribution P(x,t) over possible answers
+2. Selecting the answer that is most consistent with active anchors
+3. Creating new anchors for the next hop in the diffusion process
+
+**Compression Strategy Based on Entropy:**
+- **HIGH COMPRESSION** (Entropy={entropy:.3f} < 0.3, Confidence={confidence:.3f} > 0.7):
+  → Collapse probability mass to the MOST anchor-consistent answer
+  → High precision, low exploration
+  → If multiple answers exist, choose the one that best aligns with anchors
+  → Focus on precision over breadth
+
+- **MEDIUM COMPRESSION** (Entropy={entropy:.3f} < 0.5):
+  → Balance anchor consistency with evidence exploration
+  → Consider multiple answers but prioritize anchor-aligned ones
+  → Moderate precision and exploration
+
+- **LOW COMPRESSION** (Entropy={entropy:.3f} >= 0.5):
+  → Explore evidence more broadly
+  → Still maintain anchor consistency, but allow more exploration
+  → Lower precision, higher exploration
+
+**Anchor Consistency Priority:**
+- If the answer contains entities from active anchors → HIGH priority
+- If the answer aligns with regulator constraints → HIGH priority
+- If multiple valid answers exist → Choose the most anchor-consistent one
+- Your output becomes a NEW ANCHOR for the next hop
+
 Extract the final answer as a short phrase copied EXACTLY from the evidence.
 - Do NOT explain your answer
 - Do NOT paraphrase
@@ -240,6 +570,7 @@ Extract the final answer as a short phrase copied EXACTLY from the evidence.
 - ONLY return "unknown" if the SPECIFIC information asked for is not present in the evidence
 - If the entity name is in evidence but related attributes aren't, extract the entity name (don't return "unknown" for entity questions)
 - If evidence exists, extract the most relevant answer following the Answer Format Rules
+- **PRIORITIZE anchor-consistent answers when multiple valid answers exist**
 
 Your response MUST be a valid JSON object with this exact structure:
 {{
@@ -330,7 +661,8 @@ Your response MUST be a valid JSON object with this exact structure:
 ### Guidelines:
 1. **BE CONCISE**: Answer the subquery directly - typically 1-5 words, rarely more than 1 sentence
 2. **BE SPECIFIC**: Extract ONLY the exact answer requested - nothing else
-3. **DO NOT** include descriptions, explanations, or multiple facts
+3. **RESPECT HIERARCHICAL LEVEL**: If a hierarchical level constraint is specified above, extract the entity at that level (not a different level) - this is entropy-aware compression respecting the initial condition
+4. **DO NOT** include descriptions, explanations, or multiple facts
 4. **DO NOT** list multiple positions/entities - extract ONLY the one asked for
 5. **DO NOT** include venue names, organization names, or other context unless the question specifically asks for it
 6. If the question asks for one thing, provide ONLY that thing
@@ -425,6 +757,29 @@ Your response MUST be a valid JSON object with this exact structure:
                 # Update sources list based on actual evidence
                 answer.sources = list(set(e.source for e in answer.supporting_evidence))
                 
+                # ✅ FIRST PRINCIPLES FIX: Hierarchical Inference
+                # If answer is "unknown" due to hierarchical level mismatch, attempt inference
+                answer_lower = answer.answer.lower().strip()
+                if answer_lower == "unknown" and required_domain and required_hierarchical_level:
+                    inferred_entity = self._attempt_hierarchical_inference(
+                        question=question,
+                        context=context,
+                        required_domain=required_domain,
+                        required_level=required_hierarchical_level
+                    )
+                    
+                    if inferred_entity:
+                        logger.info(
+                            f"QA Agent: Hierarchical inference successful - inferred '{inferred_entity}' "
+                            f"from lower-level evidence (required: {required_domain}/{required_hierarchical_level})"
+                        )
+                        answer.answer = inferred_entity
+                        answer.confidence = min(0.8, answer.confidence + 0.2)  # Boost confidence slightly
+                        answer.reasoning = (
+                            f"Inferred {required_hierarchical_level} entity '{inferred_entity}' "
+                            f"from hierarchical context. " + (answer.reasoning or "")
+                        )
+                
                 # If confidence is below threshold, update the answer
                 if answer.confidence < min_confidence:
                     answer.answer = (
@@ -435,6 +790,53 @@ Your response MUST be a valid JSON object with this exact structure:
                 # Update history
                 self.conversation_history.append({"role": "user", "content": f"Q: {question}"})
                 self.conversation_history.append({"role": "assistant", "content": f"A: {answer.answer[:200]}..."})
+                
+                # ====================================================================
+                # GENERATE NEW ANCHORS FROM COMPRESSED ANSWER
+                # ====================================================================
+                # The answer is a collapsed probability mass - extract entities as new anchors
+                # These anchors will stabilize the next hop in the diffusion process
+                new_anchors = []
+                answer_text = answer.answer
+                if answer_text:
+                    import re
+                    # Extract potential entity names from answer (capitalized words/phrases)
+                    capitalized_entities = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', answer_text)
+                    for entity in capitalized_entities[:2]:  # Top 2 entities
+                        # Filter out common words
+                        if entity not in ["The", "A", "An", "This", "That", "Yes", "No", "Unknown"]:
+                            new_anchors.append({
+                                "entity": entity,
+                                "type": "extracted_answer",
+                                "hop": hop,
+                                "confidence": answer.confidence,
+                                "source": "qa_compression"
+                            })
+                
+                # ====================================================================
+                # CALCULATE ANCHOR CONSISTENCY
+                # ====================================================================
+                # Measure how consistent the answer is with active anchors
+                # This is used by Final Assembler for convergence estimation
+                anchor_consistency = self._calculate_anchor_consistency(
+                    answer_text, anchors, entity_anchors
+                )
+                
+                # ====================================================================
+                # ENHANCE RESPONSE WITH DIFFUSION METADATA
+                # ====================================================================
+                # Add diffusion-aware metadata for Final Assembler convergence estimation
+                answer_dict = answer.model_dump()
+                answer_dict["diffusion_metadata"] = {
+                    "entropy": entropy,
+                    "diffusion_coefficient": diffusion,
+                    "compression_level": compression_level,
+                    "compression_strategy": compression_strategy,
+                    "hop": hop,
+                    "new_anchors": new_anchors,
+                    "anchor_consistency": anchor_consistency,
+                    "stabilized_query": stabilized_query
+                }
                 
                 # Prepare metadata
                 metadata = {
@@ -455,11 +857,17 @@ Your response MUST be a valid JSON object with this exact structure:
                         "min_confidence": min_confidence,
                         "temperature": self.temperature
                     },
-                    "token_usage": token_usage
+                    "token_usage": token_usage,
+                    # ✅ DIFFUSION METADATA
+                    "entropy": entropy,
+                    "diffusion": diffusion,
+                    "compression_level": compression_level,
+                    "new_anchors": new_anchors,
+                    "anchor_consistency": anchor_consistency
                 }
                 
                 return AgentResponse(
-                    content=answer.model_dump_json(),
+                    content=json.dumps(answer_dict),  # Include diffusion_metadata
                     metadata=metadata
                 )
                 
@@ -639,3 +1047,50 @@ Your response MUST be a valid JSON object with this exact structure:
             ]
             
             return fallback_questions[:num_questions]
+    
+    def _calculate_anchor_consistency(self, answer: str, anchors: List, entity_anchors: Dict) -> float:
+        """
+        Calculate how consistent the answer is with active anchors.
+        
+        ====================================================================
+        ANCHOR CONSISTENCY CALCULATION
+        ====================================================================
+        Anchors are fixed points (potential wells) that stabilize reasoning.
+        This method measures how well the answer aligns with these anchors.
+        
+        Returns:
+            Consistency score [0.0, 1.0]:
+            - 1.0: Answer perfectly aligns with all anchors
+            - 0.5: Neutral (no anchors or no alignment)
+            - 0.0: Answer contradicts anchors
+        ====================================================================
+        """
+        if not anchors and not entity_anchors:
+            return 0.5  # Neutral if no anchors
+        
+        answer_lower = answer.lower()
+        consistency_score = 0.0
+        total_anchors = 0
+        
+        # Check against entity anchors (most specific)
+        for entity, anchor_data in (entity_anchors.items() if isinstance(entity_anchors, dict) else []):
+            total_anchors += 1
+            if entity.lower() in answer_lower:
+                consistency_score += 1.0
+            # Also check if anchor_data contains the entity
+            if isinstance(anchor_data, str) and anchor_data.lower() in answer_lower:
+                consistency_score += 0.5
+        
+        # Check against bucket anchors
+        for anchor in (anchors if isinstance(anchors, list) else []):
+            anchor_entity = anchor.get('entity', '') if isinstance(anchor, dict) else (anchor.entity if hasattr(anchor, 'entity') else '')
+            if anchor_entity:
+                total_anchors += 1
+                if anchor_entity.lower() in answer_lower:
+                    consistency_score += 1.0
+        
+        # Normalize to [0.0, 1.0]
+        if total_anchors > 0:
+            return consistency_score / total_anchors
+        else:
+            return 0.5  # Neutral if no valid anchors
