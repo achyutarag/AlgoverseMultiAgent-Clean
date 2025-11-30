@@ -269,8 +269,15 @@ class MARAGOrchestrator:
                 logger.info(f"Executing step {i+1}/{len(ordered_steps)}: {step.get('id', 'unknown')}")
                 
                 # Execute single step following MA-RAG sequence
-                # Pass hop number (i+1) and main query for diffusion-aware retrieval
-                step_result = await self._execute_single_step(step, plan, hop=i+1, plan_goal=main_query)
+                # Pass hop number (i+1), step context, and main query for diffusion-aware retrieval
+                step_result = await self._execute_single_step(
+                    step, 
+                    plan, 
+                    hop=i+1, 
+                    plan_goal=main_query,
+                    current_step_index=i,
+                    total_steps=len(ordered_steps)
+                )
                 
                 # Update state with step result
                 await self.state_manager.add_step_result(step["id"], step_result)
@@ -308,7 +315,9 @@ class MARAGOrchestrator:
         step: Dict[str, Any], 
         plan: Dict[str, Any],
         hop: int = 1,
-        plan_goal: Optional[str] = None
+        plan_goal: Optional[str] = None,
+        current_step_index: Optional[int] = None,
+        total_steps: Optional[int] = None
     ) -> Dict[str, Any]:
         """
         Execute a single step following MA-RAG sequence:
@@ -322,6 +331,8 @@ class MARAGOrchestrator:
             plan: The overall plan
             hop: Current hop number (for entropy tracking and reasoning flow)
             plan_goal: Main query/goal (for plan alignment regulator)
+            current_step_index: Current step index (0-based) in the plan
+            total_steps: Total number of steps in the plan
             
         Returns:
             Step execution result
@@ -396,26 +407,26 @@ class MARAGOrchestrator:
                             
                             alignment = constraint.parameters.get("alignment", 1.0)
                             
-                            # Check for hierarchical level mismatch
-                            # If plan asks for "administrative territorial entity" (state/province)
-                            # but answer is a municipality, that's a level mismatch
-                            plan_lower = plan_goal.lower()
-                            answer_lower = direct_answer.lower()
-                            step_lower = step_description.lower()
+                            # Check for hierarchical level mismatch using GranularityRegulator
+                            # (generalized, not hardcoded to location terms)
+                            from .regulators.granularity_regulator import GranularityRegulator
+                            granularity_reg = GranularityRegulator()
+                            required_domain, required_level = granularity_reg._infer_required_level(plan_goal)
+                            answer_domain, answer_level, _ = granularity_reg.classify_entity_level(direct_answer)
                             
-                            asks_for_state_level = any(term in plan_lower for term in [
-                                "administrative territorial entity", "state", "province", 
-                                "administrative entity", "territorial entity"
-                            ])
-                            answer_is_municipality = "municipality" in answer_lower
+                            # Check if answer violates required level
+                            is_level_violation = granularity_reg.is_level_violation(
+                                required_domain, required_level,
+                                answer_domain, answer_level
+                            )
                             
-                            # If plan asks for state-level but answer is municipality, that's wrong
-                            if asks_for_state_level and answer_is_municipality:
+                            # If answer violates required hierarchical level, that's wrong
+                            if is_level_violation:
                                 should_skip_retrieval = False
                                 validation_reason = (
-                                    f"Hierarchical level mismatch: plan asks for state/province level "
-                                    f"but direct_answer is municipality '{direct_answer}'. "
-                                    f"Need to retrieve state information."
+                                    f"Hierarchical level mismatch: plan requires {required_domain}/{required_level} "
+                                    f"but direct_answer is {answer_domain}/{answer_level} '{direct_answer}'. "
+                                    f"Need to retrieve correct-level information."
                                 )
                             # If alignment is very low, the answer might be incomplete
                             elif alignment < 0.3:
@@ -519,6 +530,7 @@ class MARAGOrchestrator:
             all_retrieved_docs = []
             seen_doc_ids = set()  # Track seen document IDs for deduplication
             early_terminated = False
+            last_retrieval_result = None  # Store last retrieval_result for QA agent
             
             for subquery in subqueries:
                 try:
@@ -530,7 +542,9 @@ class MARAGOrchestrator:
                         hop=hop,
                         previous_answers=previous_answers,
                         plan_goal=main_query,
-                        retriever_agent=self.retriever
+                        retriever_agent=self.retriever,
+                        current_step_index=current_step_index,
+                        total_steps=total_steps
                     )
                     
                     # Check for early termination
@@ -574,6 +588,7 @@ class MARAGOrchestrator:
                     # Normal retrieval - get documents from stabilized retrieval
                     docs_from_retrieval = retrieval_result.get("documents", [])
                     stabilized_query = retrieval_result.get("stabilized_query", subquery["query"])
+                    last_retrieval_result = retrieval_result  # Store for QA agent
                     
                     logger.debug(
                         f"Step {step['id']}: Stabilized query '{subquery['query']}' → '{stabilized_query}'. "
@@ -662,34 +677,8 @@ class MARAGOrchestrator:
                 "min_relevance": 0.2  # Lower threshold for extraction
             }
 
-            # DEBUG: Log extractor input details
-            logger.debug(f"[EXTRACTOR DEBUG] Step {step['id']}: Extractor Input Details:")
-            logger.debug(f"  - Query: {step['description'][:200]}...")  # Truncate if too long
-            logger.debug(f"  - Subqueries: {subquery_texts}")  # ADD THIS LINE to verify subqueries
-            logger.debug(f"  - Number of documents: {len(all_retrieved_docs)}")
-            logger.debug(f"  - Max documents to process: {extractor_input['max_documents']}")
-            logger.debug(f"  - Min relevance: {extractor_input['min_relevance']}")
-            logger.debug(f"  - History length: {len(history)}")
-            
-            # Show sample document structure (first 2-3 documents)
-            logger.debug(f"[EXTRACTOR DEBUG] Sample documents (first {min(3, len(all_retrieved_docs))}):")
-            for i, doc in enumerate(all_retrieved_docs[:3]):
-                doc_id = doc.get('id', 'NO_ID')
-                page_content_preview = doc.get('page_content', 'NO_CONTENT')[:200]  # First 200 chars
-                score = doc.get('score', 'NO_SCORE')
-                logger.debug(f"  Document {i+1}:")
-                logger.debug(f"    - ID: {doc_id}")
-                logger.debug(f"    - Score: {score}")
-                logger.debug(f"    - Content preview: {page_content_preview}...")
-                logger.debug(f"    - Content length: {len(doc.get('page_content', ''))}")
-                logger.debug(f"    - Metadata keys: {list(doc.get('metadata', {}).keys())}")
-            
-            # Check if documents have content
-            docs_with_content = sum(1 for doc in all_retrieved_docs if doc.get('page_content', '').strip())
-            docs_empty = len(all_retrieved_docs) - docs_with_content
-            logger.debug(f"[EXTRACTOR DEBUG] Document content status:")
-            logger.debug(f"  - Documents with content: {docs_with_content}")
-            logger.debug(f"  - Empty documents: {docs_empty}")
+            # ✅ CONCISE: Only essential extractor info
+            logger.debug(f"Extractor: {len(all_retrieved_docs)} docs → {extractor_input['max_documents']} for processing")
             
             extractor_response = await self.extractor.process(extractor_input)
             self._extract_and_aggregate_token_usage(extractor_response)
@@ -705,14 +694,48 @@ class MARAGOrchestrator:
                 raise Exception("No passages extracted")
             
 
-            # 4. QA Agent
-            logger.debug(f"Step {step['id']}: Executing QA synthesis...")
+            # 4. QA Agent - Enhanced with diffusion-aware stabilized belief field
+            # ====================================================================
+            # DIFFUSION MODEL: Multi-hop reasoning is a diffusion process where
+            # beliefs P(x,t) spread through document space. The QA agent performs
+            # entropy-aware compression, collapsing probability mass into anchors
+            # for the next hop. This is the compression step: P(x,t+1) = compress(P(x,t), anchors)
+            # ====================================================================
+            logger.debug(f"Step {step['id']}: Executing QA synthesis with diffusion-aware compression...")
+            
+            # Get flow_snapshot and constraints from retrieval_result (stabilized belief field)
+            # Use last_retrieval_result from the loop, or fallback to state_manager
+            flow_snapshot = None
+            constraints = []
+            stabilized_query_for_qa = stabilized_query
+            
+            # Try to get from last_retrieval_result (from stabilize_and_retrieve)
+            if last_retrieval_result:
+                flow_snapshot = last_retrieval_result.get("flow_snapshot")
+                constraints = last_retrieval_result.get("constraints", [])
+                stabilized_query_for_qa = last_retrieval_result.get("stabilized_query", stabilized_query)
+            
+            # If not available, try to get from state_manager (for entropy tracking)
+            if not flow_snapshot and hasattr(self.state_manager, 'reasoning_flow'):
+                try:
+                    # Get current flow state from state_manager
+                    current_state = await self.state_manager.get_current_flow_state()
+                    if current_state:
+                        flow_snapshot = current_state
+                except Exception as e:
+                    logger.debug(f"Could not get flow_snapshot from state_manager: {e}")
+            
             qa_input = {
                 "question": step["description"],
                 "context": extracted_passages,
                 "step_context": step,
                 "overall_query": plan.get("main_question", ""),
-                "previous_answers": previous_answers
+                "previous_answers": previous_answers,
+                # ✅ DIFFUSION-AWARE INPUTS: Stabilized belief field
+                "flow_snapshot": flow_snapshot,  # Contains H(t), D(t), anchors, beliefs (may be None)
+                "regulator_constraints": constraints,  # Boundary conditions from regulators
+                "stabilized_query": stabilized_query_for_qa,  # Stabilized query used for retrieval
+                "hop": hop  # Current hop number (time step in diffusion)
             }
             
             qa_response = await self.qa.process(qa_input)
