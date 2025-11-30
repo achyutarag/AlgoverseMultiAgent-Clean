@@ -4,6 +4,7 @@ from .base_agent import BaseAgent, AgentResponse
 from .tokenization_utils import tokenization_utils, TokenizationUtils
 import json
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -385,6 +386,24 @@ Your sub-query MUST be a retrieval-focused question that can be used to search d
 - ✅ CORRECT: Question asks "Which writer was from England, X or Y?" → Subqueries "What is the nationality of X?" and "What is the nationality of Y?" (helps identify which entity matches)
 - Preserve the original question's intent: entity selection vs attribute extraction
 
+**CRITICAL: Preserve Hierarchical Level Requirements**
+- **First Principle**: Query constraints are fundamental requirements that must be preserved throughout all subqueries
+- If the original query specifies a hierarchical level, classification level, or granularity requirement, your sub-queries MUST preserve that same level
+- **DO NOT change hierarchical levels**: If the original query asks for level X, do not ask for level Y (higher or lower) in your sub-queries
+- **DO NOT generalize or specify**: If the original query asks for a specific level, do not make it more general or more specific
+- **Apply to any hierarchical structure**:
+  * Administrative/territorial: country, state/province, region, municipality, city, district
+  * Organizational: company, division, department, team, individual
+  * Taxonomic: kingdom, phylum, class, order, family, genus, species
+  * Temporal: year, month, week, day, hour, minute
+  * Any other hierarchical classification system
+- **Key principle**: Subqueries are sub-problems of the same problem - they must satisfy the same constraints as the original query
+- **Example**: Original query asks for "state/province level entity" → Sub-query must ask for "state/province" (NOT "country" or "municipality" or vague "location")
+- **Example**: Original query asks for "department level" → Sub-query must ask for "department" (NOT "company" or "team")
+- **Example**: Original query asks for "genus level" → Sub-query must ask for "genus" (NOT "species" or "family")
+- If the original query uses specific terminology for a level (e.g., "administrative territorial entity", "administrative division"), use that terminology or equivalent terms for the same level in your sub-queries
+- **Exception**: Only change levels if explicitly required by the step objective (e.g., step says "find the parent entity" or "find the containing entity at a higher level")
+
 **CRITICAL: Semantic Interpretation of "Used For" Phrases**
 - When the step or original query contains "used for Y", interpret Y as function/purpose, NOT category
 - Generate sub-queries that ask about functional/purpose use, not property type/category
@@ -506,8 +525,16 @@ Return ONLY the JSON object, no other text."""
                 for i, sq in enumerate(result["sub_queries"])
             ]
             
-            # Sort sub-queries by priority (ascending, so 1 comes first)
-            parsed_sub_queries.sort(key=lambda x: x.priority)
+            # ====================================================================
+            # ENTROPY-MINIMIZATION SORTING (First Principles)
+            # ====================================================================
+            # Sort by entropy-minimization score: prefer low-entropy, high-information-density
+            # subqueries first. This reduces initial drift and enables faster convergence.
+            # Higher score = lower entropy = better (execute first)
+            # We negate the score so that higher scores (lower entropy) come first
+            parsed_sub_queries.sort(
+                key=lambda sq: -self.score_subquery_entropy(sq, previous_answers)
+            )
             
             return AgentResponse(
                 content=json.dumps({
@@ -577,3 +604,75 @@ Return ONLY the JSON object, no other text."""
                     "exception_type": type(e).__name__
                 }
             )
+    
+    def score_subquery_entropy(self, sq: SubQuery, previous_answers: Dict[str, Any]) -> float:
+        """
+        Estimate entropy impact of subquery. Goal = prefer high information density, low ambiguity queries.
+        
+        ====================================================================
+        ENTROPY-MINIMIZATION SCORING (First Principles)
+        ====================================================================
+        This method scores subqueries to minimize initial entropy in the diffusion process.
+        Low-entropy subqueries (high score) are executed first to:
+        1. Reduce initial drift that propagates through all subsequent hops
+        2. Enable faster convergence by starting with high-information-density queries
+        3. Reduce burden on regulators (prevent drift at source vs. correct downstream)
+        
+        Scoring Strategy:
+        - Penalties: Patterns that indicate high entropy (ambiguity, complexity, early synthesis)
+        - Rewards: Patterns that indicate low entropy (specific targets, anchor usage)
+        
+        Returns:
+            Score where higher = lower entropy (better). Subqueries are sorted by -score
+            so higher scores (lower entropy) execute first.
+        ====================================================================
+        
+        Args:
+            sq: SubQuery object to score
+            previous_answers: Dict of previous step answers (for anchor detection)
+            
+        Returns:
+            Entropy-minimization score (higher = lower entropy = better)
+        """
+        penalties = 0
+        text = sq.query.lower()
+        
+        # ====================================================================
+        # PENALTIES (Red flags = high-entropy subqueries)
+        # ====================================================================
+        if "and" in text:
+            penalties += 1  # multi-entity -> ambiguous, increases entropy
+        if "compare" in text:
+            penalties += 1  # synthesis early -> entropy spike
+        if "relationship" in text:
+            penalties += 1  # complex relations -> high entropy
+        if "both" in text:
+            penalties += 1  # multiple entities -> ambiguity
+        if "either" in text or (" or " in text and " or " not in [" for ", " of ", " to "]):
+            penalties += 0.5  # disjunction -> some ambiguity
+        
+        # ====================================================================
+        # REWARDS (Anchoring, factual, atomic questions)
+        # ====================================================================
+        reward = 0
+        # Specific retrieval targets (who/what/where) are low-entropy
+        if "who" in text or "what" in text or "where" in text:
+            reward += 1  # specific retrieval target
+        
+        # Uses known anchor from previous steps (promotes fixed-point convergence)
+        if previous_answers:
+            # Check if any entity from previous answers appears in the query
+            for step_id, answer in previous_answers.items():
+                answer_str = str(answer).lower()
+                # Extract potential entity names (capitalized words)
+                entities = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', str(answer))
+                for entity in entities[:3]:  # Top 3 entities per answer
+                    if entity.lower() in text:
+                        reward += 1  # uses known anchor
+                        break  # Count each anchor once
+        
+        # ====================================================================
+        # FINAL SCORE
+        # ====================================================================
+        # Higher score = lower entropy = better (execute first)
+        return reward - penalties
