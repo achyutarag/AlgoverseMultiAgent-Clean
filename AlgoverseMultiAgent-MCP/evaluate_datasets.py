@@ -354,8 +354,14 @@ async def evaluate_dataset(dataset_name: str, dataset_name_full: str, dataset_co
     
     return results, avg_em, avg_f1, avg_latency, total_latency, avg_tokens
 
-async def main(dataset: str = "all"):
-    """Run evaluation on specified dataset(s)."""
+async def main(dataset: str = "all", num_examples: int | None = None):
+    """Run evaluation on specified dataset(s).
+
+    Args:
+        dataset: Which dataset group to evaluate ("all", "hotpotqa", "musique", etc.).
+        num_examples: Optional override for number of examples per dataset. If None,
+            fall back to the historical defaults (HotpotQA=20, MuSiQue=5).
+    """
     print("🚀 Starting MA-RAG Pipeline Evaluation")
     print("=" * 60)
     
@@ -366,11 +372,13 @@ async def main(dataset: str = "all"):
         print(f"\n{'='*60}")
         print("Evaluating HotpotQA...")
         print(f"{'='*60}")
+        # Use CLI override if provided, otherwise keep original default (20)
+        hotpot_n = num_examples if num_examples is not None else 20
         hotpot_results, hotpot_em, hotpot_f1, hotpot_avg_latency, hotpot_total_latency, hotpot_avg_tokens = await evaluate_dataset(
-            "HotpotQA", 
-            "hotpot_qa", 
+            "HotpotQA",
+            "hotpot_qa",
             "distractor",
-            num_examples=20
+            num_examples=hotpot_n
         )
         results_summary.append(("HotpotQA", hotpot_em, hotpot_f1))
         print(f"\nHotpotQA - EM: {hotpot_em:.4f}, F1: {hotpot_f1:.4f}")
@@ -380,11 +388,13 @@ async def main(dataset: str = "all"):
         print(f"\n{'='*60}")
         print("Evaluating MuSiQue...")
         print(f"{'='*60}")
+        # Use CLI override if provided, otherwise keep original default (5)
+        musique_n = num_examples if num_examples is not None else 5
         musique_results, musique_em, musique_f1, musique_avg_latency, musique_total_latency, musique_avg_tokens = await evaluate_dataset(
-            "MuSiQue", 
-            "allenai/musique-v1", 
+            "MuSiQue",
+            "allenai/musique-v1",
             None,  # MuSiQue doesn't have configs like HotpotQA
-            num_examples=5
+            num_examples=musique_n
         )
         results_summary.append(("MuSiQue", musique_em, musique_f1))
         print(f"\nMuSiQue - EM: {musique_em:.4f}, F1: {musique_f1:.4f}")
@@ -407,6 +417,13 @@ if __name__ == "__main__":
         choices=["all", "hotpotqa", "hotpot", "musique", "musique-v1"],
         help="Dataset to evaluate: 'all' (default), 'hotpotqa', or 'musique'"
     )
+    parser.add_argument(
+        "--num_examples",
+        type=int,
+        default=None,
+        help="Optional override for number of examples per dataset "
+             "(default: 20 for HotpotQA, 5 for MuSiQue)"
+    )
     args = parser.parse_args()
-    asyncio.run(main(args.dataset))
+    asyncio.run(main(args.dataset, args.num_examples))
 

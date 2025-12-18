@@ -7,6 +7,14 @@ from typing import Dict, Any, List, Optional, Union
 
 from pydantic import BaseModel, Field
 
+# ✅ MCP import guardrail: ensure `import agents.*` resolves to AlgoverseMultiAgent-MCP/agents
+# This repo has TWO `agents/` packages (repo-root and MCP). Without this, runs from repo root
+# can silently bypass MCP invariants.
+from mcp_bootstrap import activate_mcp, assert_using_mcp_agents
+
+activate_mcp()
+assert_using_mcp_agents()
+
 from agents.planner_agent import PlannerAgent
 from agents.step_definer_agent import StepDefinerAgent
 from agents.retriever_agent import RetrieverAgent

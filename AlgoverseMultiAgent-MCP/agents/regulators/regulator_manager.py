@@ -259,11 +259,17 @@ class RegulatorManager:
                                 f"(safeguard check in regulator_manager)"
                             )
                 
-                # Reinforce evidence-based terminology
+                # ✅ FIX: Reinforce evidence-based terminology (limit additions to prevent query bloat)
+                query_lower = query.lower()
+                added_count = 0
+                added_terms = []
                 for term in filtered_terms:
-                    if term.lower() not in query.lower():
+                    if term.lower() not in query_lower and added_count < 2:  # Limit to 2 additions
                         query = f"{query} {term}"
-                logger.debug(f"Evidence reinforcement: {filtered_terms}")
+                        query_lower = query.lower()  # Update for next iteration
+                        added_count += 1
+                        added_terms.append(term)
+                logger.debug(f"Evidence reinforcement: {added_terms if added_terms else 'none (already in query or limit reached)'}")
         
         
         
@@ -310,12 +316,31 @@ class RegulatorManager:
         elif constraint_type == "boundary":
             goal_keywords = params.get("goal_keywords", [])
             if goal_keywords:
+                # ✅ FIX: Filter out generic framing words that don't help retrieval
+                generic_framing_words = {
+                    "identify", "determine", "find", "locate", "provide", "within",
+                    "provided", "context", "specific", "designated", "particular",
+                    "given", "available", "information", "details", "regarding",
+                    "about", "concerning", "related", "relevant", "primary",
+                    "first", "overarching", "main", "key", "important"
+                }
+                
+                # Only add semantically meaningful keywords (nouns, entities, specific terms)
+                meaningful_keywords = [
+                    kw for kw in goal_keywords[:8]  # Check more keywords but filter aggressively
+                    if kw.lower() not in generic_framing_words
+                    and len(kw) > 3  # Filter very short words
+                ]
+                
                 # Add goal keywords to query if missing to help retrieval
                 query_lower = query.lower()
-                for keyword in goal_keywords[:5]:  # Top 5 keywords (increased from 3)
-                    if keyword.lower() not in query_lower:
+                added_count = 0
+                for keyword in meaningful_keywords:
+                    if keyword.lower() not in query_lower and added_count < 2:  # Limit to 2 additions
                         query = f"{query} {keyword}"
-                        logger.debug(f"Added goal keyword to query: {keyword}")
+                        query_lower = query.lower()  # Update for next iteration
+                        added_count += 1
+                        logger.debug(f"Added meaningful goal keyword to query: {keyword}")
         
         # Confidence Regulator: Diffusion control
         elif "confidence" in constraint.regulator_name.lower():

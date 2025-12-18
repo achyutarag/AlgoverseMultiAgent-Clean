@@ -34,3 +34,5 @@
 20251130_013450 - MuSiQue - 5 examples - EM: 0.2000, F1: 0.2000
 20251130_121830 - MuSiQue - 5 examples - EM: 0.2000, F1: 0.2000
 20251130_131433 - MuSiQue - 5 examples - EM: 0.0000, F1: 0.0000
+20251217_235114 - MuSiQue - 10 examples - EM: 0.3000, F1: 0.5700
+20251218_010902 - MuSiQue - 10 examples - EM: 0.4000, F1: 0.6100

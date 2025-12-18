@@ -436,10 +436,48 @@ class MARAGOrchestrator:
                                     f"'{direct_answer}'. Proceeding with retrieval to verify."
                                 )
                             else:
-                                validation_reason = (
-                                    f"Direct answer '{direct_answer}' validated: "
-                                    f"alignment={alignment:.2f}, level check passed"
-                                )
+                                # ✅ FIX 4: Boundary Condition Check (HARD FILTER)
+                                # Check if direct_answer satisfies the query's boundary condition
+                                # This is a CONSTRAINT, not a score - answers that violate are rejected
+                                query_to_check = step_description or plan_goal or ""
+                                if query_to_check and hasattr(self.state_manager, '_check_answer_satisfies_boundary_condition'):
+                                    try:
+                                        boundary_check = self.state_manager._check_answer_satisfies_boundary_condition(
+                                            direct_answer,
+                                            query_to_check
+                                        )
+                                        
+                                        if not boundary_check.get("satisfies", True):
+                                            should_skip_retrieval = False
+                                            validation_reason = (
+                                                f"Boundary condition violation: direct_answer '{direct_answer}' "
+                                                f"is in input space (not solution space). "
+                                                f"{boundary_check.get('reason', 'answer violates query boundary condition')}. "
+                                                f"Proceeding with retrieval to find valid solution."
+                                            )
+                                            logger.warning(
+                                                f"Step {step['id']}: Direct answer '{direct_answer}' rejected due to "
+                                                f"boundary condition violation: {boundary_check.get('reason', 'unknown')}"
+                                            )
+                                        else:
+                                            validation_reason = (
+                                                f"Direct answer '{direct_answer}' validated: "
+                                                f"alignment={alignment:.2f}, level check passed, "
+                                                f"boundary condition satisfied"
+                                            )
+                                    except Exception as boundary_error:
+                                        logger.warning(
+                                            f"Boundary condition check failed for direct_answer: {boundary_error}. "
+                                            f"Proceeding with retrieval to be safe."
+                                        )
+                                        should_skip_retrieval = False
+                                        validation_reason = f"Boundary condition check error: {boundary_error}"
+                                else:
+                                    # If boundary check not available, still validate other checks passed
+                                    validation_reason = (
+                                        f"Direct answer '{direct_answer}' validated: "
+                                        f"alignment={alignment:.2f}, level check passed"
+                                    )
                     except Exception as e:
                         logger.warning(
                             f"Failed to validate direct_answer with diffusion-aware components: {e}. "
@@ -496,6 +534,18 @@ class MARAGOrchestrator:
                         "direct_answer": True,
                         "timestamp": datetime.now().isoformat()
                     }
+
+                    # ✅ Explicitly declare retrieval skipped (postcondition satisfaction)
+                    # This hop is allowed to proceed without stabilize_and_retrieve().
+                    step_result["debug_metadata"] = step_result.get("debug_metadata", {})
+                    step_result["debug_metadata"]["orchestrator"] = {
+                        "retrieval_attempted": False,
+                        "retrieval_skipped": True,
+                        "retrieval_skipped_reason": "direct_answer_used",
+                        "forced_retrieval": False,
+                        "forced_retrieval_reason": None,
+                        "forced_retrieval_query": None,
+                    }
                     
                     # Update state and return
                     await self.state_manager.add_step_result(step['id'], step_result)
@@ -531,59 +581,44 @@ class MARAGOrchestrator:
             seen_doc_ids = set()  # Track seen document IDs for deduplication
             early_terminated = False
             last_retrieval_result = None  # Store last retrieval_result for QA agent
+            stabilized_query = None  # ✅ FIX: Initialize before loop to prevent NameError
+            # ✅ HOP VALIDITY POSTCONDITION (control-only)
+            # A hop is valid only if:
+            # - stabilize_and_retrieve() was executed (retrieval_attempted == True), OR
+            # - retrieval was explicitly skipped and declared (retrieval_skipped == True with a reason).
+            # If neither is true, we must NOT silently continue to extractor/QA.
+            retrieval_attempted = False
+            retrieval_skipped = False
+            retrieval_skipped_reason = None
+            forced_retrieval = False
+            forced_retrieval_reason = None
+            forced_retrieval_query = None
             
             for subquery in subqueries:
                 try:
+                    retrieval_attempted = True
                     # Use diffusion-aware retrieval with stabilization
                     # Get main query from plan if plan_goal not provided
-                    main_query = plan_goal or plan.get("query") or plan.get("disambiguated_query") or ""
-                    retrieval_result = await self.state_manager.stabilize_and_retrieve(
-                        proposed_query=subquery["query"],
-                        hop=hop,
-                        previous_answers=previous_answers,
-                        plan_goal=main_query,
-                        retriever_agent=self.retriever,
-                        current_step_index=current_step_index,
-                        total_steps=total_steps
-                    )
+                    main_query = plan_goal or plan.get("query") or plan.get("disambiguated_query") or None
                     
-                    # Check for early termination
-                    if retrieval_result.get("direct_answer"):
-                        logger.info(f"Step {step['id']}: Early termination triggered - entropy low, confidence high")
-                        early_terminated = True
-                        # Use the direct answer as the result
-                        direct_answer = retrieval_result.get("answer", "")
-                        confidence = retrieval_result.get("confidence", 0.9)
-                        
-                        # Structure result for early termination
-                        step_result = {
-                            "step_id": step['id'],
-                            "step_description": step.get("description", ""),
-                            "subqueries": subqueries,
-                            "retrieved_documents": [],
-                            "extracted_passages": [{
-                                "text": direct_answer,
-                                "document_id": "early_termination",
-                                "chunk_id": "direct_answer",
-                                "relevance": confidence,
-                                "reasoning": retrieval_result.get("reasoning", "Early termination based on entropy and confidence"),
-                                "source_context": "Early termination"
-                            }],
-                            "qa_result": {
-                                "answer": direct_answer,
-                                "confidence": confidence,
-                                "sources": ["early_termination"],
-                                "supporting_evidence": []
-                            },
-                            "success": True,
-                            "early_termination": True,
-                            "stabilized_query": retrieval_result.get("stabilized_query", subquery["query"]),
-                            "timestamp": datetime.now().isoformat()
-                        }
-                        
-                        # Update state and return early termination result
-                        await self.state_manager.add_step_result(step['id'], step_result)
-                        return step_result
+                    # Build kwargs to avoid argument conflicts
+                    retrieval_kwargs = {
+                        "proposed_query": subquery["query"],
+                        "hop": hop,
+                        "previous_answers": previous_answers,
+                        "retriever_agent": self.retriever,
+                        "current_step_index": current_step_index,
+                        "total_steps": total_steps
+                    }
+                    # Only pass plan_goal if it has a value (not None or empty string)
+                    if main_query:
+                        retrieval_kwargs["plan_goal"] = main_query
+                    
+                    retrieval_result = await self.state_manager.stabilize_and_retrieve(**retrieval_kwargs)
+                    
+                    # ✅ REMOVED: Early termination check before retrieval
+                    # Early termination now happens AFTER QA produces the current step's answer
+                    # This ensures the current step always executes and finds its own answer
                     
                     # Normal retrieval - get documents from stabilized retrieval
                     docs_from_retrieval = retrieval_result.get("documents", [])
@@ -620,6 +655,7 @@ class MARAGOrchestrator:
                         )
                     
                 except Exception as e:
+                    retrieval_attempted = True
                     logger.warning(f"Diffusion-aware retrieval failed for subquery '{subquery['query']}': {e}")
                     # Fallback to direct retrieval if stabilize_and_retrieve fails
                     try:
@@ -645,6 +681,55 @@ class MARAGOrchestrator:
                     except Exception as fallback_error:
                         logger.error(f"Fallback retrieval failed: {fallback_error}")
                         continue
+
+            # ✅ POSTCONDITION ENFORCEMENT: If retrieval was neither attempted nor explicitly skipped, force recovery.
+            # (This prevents "phantom hops" that emit QA results without running retrieval/regulators.)
+            if not retrieval_attempted and not retrieval_skipped:
+                forced_retrieval = True
+                forced_retrieval_reason = "hop_validity_violation_no_retrieval_or_skip_declared"
+
+                # Fallback preference: last stabilized query (from StateManager) -> plan goal -> step description/objective.
+                last_stabilized = getattr(self.state_manager, "_last_stabilized_query", None)
+                forced_retrieval_query = (
+                    last_stabilized
+                    or plan_goal
+                    or step.get("objective")
+                    or step.get("description")
+                    or "search for relevant information"
+                )
+
+                main_query = plan_goal or plan.get("query") or plan.get("disambiguated_query") or None
+                retrieval_kwargs = {
+                    "proposed_query": str(forced_retrieval_query),
+                    "hop": hop,
+                    "previous_answers": previous_answers,
+                    "retriever_agent": self.retriever,
+                    "current_step_index": current_step_index,
+                    "total_steps": total_steps
+                }
+                if main_query:
+                    retrieval_kwargs["plan_goal"] = main_query
+
+                retrieval_attempted = True
+                retrieval_result = await self.state_manager.stabilize_and_retrieve(**retrieval_kwargs)
+                docs_from_retrieval = retrieval_result.get("documents", [])
+                stabilized_query = retrieval_result.get("stabilized_query", str(forced_retrieval_query))
+                last_retrieval_result = retrieval_result
+
+                for doc in docs_from_retrieval:
+                    doc_id = doc.get("id") or doc.get("metadata", {}).get("id")
+                    if doc_id and doc_id not in seen_doc_ids:
+                        seen_doc_ids.add(doc_id)
+                        all_retrieved_docs.append(doc)
+                    elif not doc_id:
+                        all_retrieved_docs.append(doc)
+
+            # Hard guardrail: if still neither attempted nor explicitly skipped, abort hop.
+            if not retrieval_attempted and not retrieval_skipped:
+                raise Exception(
+                    "Hop contract violation: neither retrieval_attempted nor retrieval_skipped "
+                    "(recovery failed). Aborting hop."
+                )
             
             if not all_retrieved_docs:
                 raise Exception("No documents retrieved")
@@ -707,13 +792,14 @@ class MARAGOrchestrator:
             # Use last_retrieval_result from the loop, or fallback to state_manager
             flow_snapshot = None
             constraints = []
-            stabilized_query_for_qa = stabilized_query
+            # ✅ FIX: Safe fallback - use stabilized_query if available, else use first subquery, else step description
+            stabilized_query_for_qa = stabilized_query if stabilized_query else (subqueries[0]["query"] if subqueries else step.get("description", ""))
             
             # Try to get from last_retrieval_result (from stabilize_and_retrieve)
             if last_retrieval_result:
                 flow_snapshot = last_retrieval_result.get("flow_snapshot")
                 constraints = last_retrieval_result.get("constraints", [])
-                stabilized_query_for_qa = last_retrieval_result.get("stabilized_query", stabilized_query)
+                stabilized_query_for_qa = last_retrieval_result.get("stabilized_query", stabilized_query_for_qa)
             
             # If not available, try to get from state_manager (for entropy tracking)
             if not flow_snapshot and hasattr(self.state_manager, 'reasoning_flow'):
@@ -745,6 +831,63 @@ class MARAGOrchestrator:
             
             clean_qa = TokenizationUtils.strip_markdown_json(qa_response.content)
             qa_result = json.loads(clean_qa)
+            
+            # ✅ FIRST PRINCIPLES FIX: Early termination check AFTER QA produces answer
+            # ====================================================================
+            # Early termination should check if the CURRENT step's answer satisfies
+            # convergence conditions, not the previous step's answer.
+            # 
+            # This prevents the bug where step N+1 returns step N's intermediate answer
+            # instead of finding its own answer. In multi-hop reasoning, each step must
+            # find its own answer (e.g., step N finds entity X, step N+1 finds property Y of X).
+            # ====================================================================
+            current_answer = qa_result.get("answer", "")
+            current_confidence = qa_result.get("confidence", 0.0)
+            
+            # Only check early termination if:
+            # 1. We're on the last step (current_step_index == total_steps - 1)
+            # 2. The answer is valid (not empty/unknown)
+            # 3. We have the necessary components
+            if (current_step_index is not None and total_steps is not None and
+                current_step_index == total_steps - 1 and
+                current_answer and current_answer.lower().strip() not in ["unknown", "none", "n/a", ""] and
+                hasattr(self.state_manager, '_check_termination_validity')):
+                
+                # Update flow state with current step's answer for convergence check
+                # Add current answer to previous_answers temporarily for the check
+                temp_previous_answers = dict(previous_answers) if previous_answers else {}
+                temp_previous_answers[f"step_{step['id']}"] = {
+                    "answer": current_answer,
+                    "confidence": current_confidence,
+                    "sources": qa_result.get("sources", [])
+                }
+                
+                # Get updated flow snapshot with current answer
+                updated_flow_snapshot = self.state_manager._update_flow_state(
+                    hop=hop + 1,  # Next hop (after current step)
+                    previous_answers=temp_previous_answers,
+                    plan_goal=plan_goal
+                )
+                
+                # Check if current step's answer satisfies convergence
+                termination_info = self.state_manager._check_termination_validity(
+                    flow_snapshot=updated_flow_snapshot,
+                    plan_goal=plan_goal,
+                    hop=hop + 1,
+                    previous_answers=temp_previous_answers,
+                    constraints=constraints,
+                    current_step_index=current_step_index,
+                    total_steps=total_steps,
+                    current_query=step.get("description", "") or stabilized_query_for_qa
+                )
+                
+                if termination_info.get("can_terminate", False):
+                    logger.info(
+                        f"Step {step['id']}: Early termination after QA - current answer '{current_answer}' "
+                        f"satisfies convergence conditions: {termination_info.get('reason', 'convergence met')}"
+                    )
+                    # Mark as early termination but still return the full step result
+                    # (answer is already in qa_result)
 
             #Update MCP state after step completes
             step_result_dict = {
@@ -761,7 +904,7 @@ class MARAGOrchestrator:
             )
             
             # Return comprehensive step result
-            return {
+            step_result = {
                 "step_id": step["id"],
                 "step_description": step.get("description", ""),
                 "subqueries": subqueries,
@@ -772,16 +915,40 @@ class MARAGOrchestrator:
                 "timestamp": datetime.now().isoformat()
                 
             }
+
+            # ✅ INVARIANT METADATA: Make retrieval behavior observable per hop
+            step_result["debug_metadata"] = {
+                "retrieval_attempted": retrieval_attempted,
+                "retrieval_skipped": retrieval_skipped,
+                "retrieval_skipped_reason": retrieval_skipped_reason,
+                "forced_retrieval": forced_retrieval,
+                "forced_retrieval_reason": forced_retrieval_reason,
+                "forced_retrieval_query": forced_retrieval_query,
+            }
+
+            return step_result
             
         except Exception as e:
             logger.error(f"Step execution failed: {str(e)}")
-            return {
+            step_result = {
                 "step_id": step["id"],
                 "step_description": step.get("description", ""),
                 "error": str(e),
                 "success": False,
                 "timestamp": datetime.now().isoformat()
             }
+            # ✅ Always surface hop validity state even on errors (never allow debug_metadata == {})
+            step_result["debug_metadata"] = step_result.get("debug_metadata", {})
+            step_result["debug_metadata"]["orchestrator"] = {
+                "retrieval_attempted": locals().get("retrieval_attempted", False),
+                "retrieval_skipped": locals().get("retrieval_skipped", False),
+                "retrieval_skipped_reason": locals().get("retrieval_skipped_reason", None),
+                "forced_retrieval": locals().get("forced_retrieval", False),
+                "forced_retrieval_reason": locals().get("forced_retrieval_reason", None),
+                "forced_retrieval_query": locals().get("forced_retrieval_query", None),
+                "invalid_hop": (not locals().get("retrieval_attempted", False) and not locals().get("retrieval_skipped", False)),
+            }
+            return step_result
     
     async def _assemble_final_answer(self, plan: Dict[str, Any], step_results: List[Dict[str, Any]]) -> Dict[str, Any]:
         """

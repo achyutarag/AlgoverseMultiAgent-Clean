@@ -21,6 +21,23 @@ class ExecutionState(BaseModel):
     context: Dict[str, Any] = Field(default_factory=dict, description="Additional context")
     start_time: Optional[datetime] = Field(None, description="Execution start time")
     last_update: Optional[datetime] = Field(None, description="Last state update time")
+    
+    # ✅ GLOBAL ANCHOR STATE (No Silent Forgetting Invariant)
+    # Validated anchors persist across hops unless explicitly revoked.
+    validated_anchors: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict,
+        description=(
+            "Globally validated anchors that must persist across hops unless "
+            "explicitly revoked with a recorded reason and evidence."
+        ),
+    )
+    revoked_anchors: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "History of explicitly revoked anchors: "
+            "[{'anchor': str, 'hop': int, 'reason': str, 'evidence': Optional[Any]}]."
+        ),
+    )
 
 class StateManager:
     """
@@ -93,12 +110,17 @@ class StateManager:
             _extract_evidence_terms,
             _detect_relation_direction,
             _calculate_plan_alignment,
-            _calculate_confidence
+            _calculate_confidence,
+            _should_create_anchor,
+            _calculate_entropy_aware_strength
         )
         from .retrieval import (
             stabilize_and_retrieve,
             _entropy_aware_retrieve,
-            _check_termination_validity
+            _check_termination_validity,
+            _check_answer_satisfies_boundary_condition,
+            _extract_subject_entities,
+            _calculate_query_complexity
         )
         from .metrics import (
             get_execution_summary,
@@ -114,12 +136,40 @@ class StateManager:
         self._detect_relation_direction = _detect_relation_direction.__get__(self, StateManager)
         self._calculate_plan_alignment = _calculate_plan_alignment.__get__(self, StateManager)
         self._calculate_confidence = _calculate_confidence.__get__(self, StateManager)
-        self.stabilize_and_retrieve = stabilize_and_retrieve.__get__(self, StateManager)
+        self._should_create_anchor = _should_create_anchor.__get__(self, StateManager)
+        self._calculate_entropy_aware_strength = _calculate_entropy_aware_strength.__get__(self, StateManager)
+        
+        # ✅ FIX: Properly bind stabilize_and_retrieve to avoid argument conflicts
+        # Create a bound method wrapper that ensures correct argument passing
+        async def bound_stabilize_and_retrieve(proposed_query, hop, previous_answers, plan_goal=None, retriever_agent=None, current_step_index=None, total_steps=None):
+            return await stabilize_and_retrieve(
+                self, proposed_query, hop, previous_answers, plan_goal, retriever_agent, current_step_index, total_steps
+            )
+        self.stabilize_and_retrieve = bound_stabilize_and_retrieve
+        
         self._entropy_aware_retrieve = _entropy_aware_retrieve.__get__(self, StateManager)
         self._check_termination_validity = _check_termination_validity.__get__(self, StateManager)
+        self._check_answer_satisfies_boundary_condition = _check_answer_satisfies_boundary_condition.__get__(self, StateManager)
+        self._extract_subject_entities = _extract_subject_entities.__get__(self, StateManager)
+        self._calculate_query_complexity = _calculate_query_complexity.__get__(self, StateManager)
         self.get_execution_summary = get_execution_summary.__get__(self, StateManager)
         self.get_execution_snapshots = get_execution_snapshots.__get__(self, StateManager)
         self.get_step_dependencies_status = get_step_dependencies_status.__get__(self, StateManager)
+    
+    async def get_current_flow_state(self):
+        """
+        Get current flow snapshot from reasoning flow.
+        
+        Returns:
+            FlowSnapshot if available, None otherwise
+        """
+        if self.reasoning_flow:
+            try:
+                return self.reasoning_flow.get_flow_snapshot()
+            except Exception as e:
+                logger.debug(f"Could not get flow snapshot: {e}")
+                return None
+        return None
     
     async def initialize_execution(
         self, 
@@ -265,7 +315,9 @@ class StateManager:
                 previous_answers[step_id] = {
                     "answer": qa_result.get("answer", ""),
                     "confidence": qa_result.get("confidence", 0.0),
-                    "sources": qa_result.get("sources", [])
+                    "sources": qa_result.get("sources", []),
+                    # ✅ FIX: Include diffusion_metadata so posterior anchors can be consumed
+                    "diffusion_metadata": qa_result.get("diffusion_metadata", {})
                 }
         
         return previous_answers

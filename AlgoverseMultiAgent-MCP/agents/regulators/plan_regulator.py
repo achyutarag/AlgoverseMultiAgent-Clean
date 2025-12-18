@@ -6,17 +6,18 @@ import re
 
 logger = logging.getLogger(__name__)
 
+
 class PlanRegulator(BaseRegulator):
     """
-    Plan Regulator: P(x, T) = δ(x - goal)
-    
-    Stabilizes next-hop goal or subtask and prevents wandering/incoherence.
-    Defines final end-state boundary condition.
+    Plan Regulator: global goal boundary condition.
+
+    Defines a soft boundary toward the plan goal. The boundary
+    always exists; its strength is modulated by alignment.
     """
-    
+
     def __init__(self, weight: float = 0.9):
         super().__init__("Plan", weight)
-    
+
     def apply_constraint(
         self,
         proposed_query: str,
@@ -25,36 +26,33 @@ class PlanRegulator(BaseRegulator):
         plan_goal: Optional[str] = None
     ) -> RegulatorConstraint:
         """
-        Apply plan goal boundary constraint.
-        
-        Ensures query aligns with the overall plan goal and maintains
-        coherence with the intended reasoning trajectory.
+        Emit a plan-alignment boundary constraint.
+
+        IMPORTANT:
+        - The boundary is always active if a plan goal exists.
+        - Alignment modulates strength only (never gates behavior).
         """
+
         if not plan_goal:
-            # No plan goal → lower weight
+            # No global goal → very weak boundary
             return RegulatorConstraint(
                 regulator_name=self.name,
                 constraint_type="boundary",
-                weight=0.3,
+                weight=0.2,
                 parameters={"has_goal": False}
             )
-        
-        # Extract goal keywords
+
         goal_keywords = self._extract_goal_keywords(plan_goal)
-        
-        # Check alignment with goal
+
         alignment = self._calculate_goal_alignment(
             proposed_query,
             plan_goal,
             goal_keywords
         )
-        
-        # Check if query is on track toward goal
-        on_track = alignment > 0.3
-        
-        # Weight based on alignment
-        weight = self.weight * alignment
-        
+
+        # Boundary strength scales smoothly with alignment
+        weight = max(0.1, self.weight * alignment)
+
         return RegulatorConstraint(
             regulator_name=self.name,
             constraint_type="boundary",
@@ -62,11 +60,11 @@ class PlanRegulator(BaseRegulator):
             parameters={
                 "plan_goal": plan_goal,
                 "goal_keywords": goal_keywords,
-                "alignment": alignment,
-                "on_track": on_track
+                "alignment": alignment
             }
         )
     
+
     def check_violation(
         self,
         query: str,
@@ -74,68 +72,68 @@ class PlanRegulator(BaseRegulator):
         current_state: Dict[str, Any]
     ) -> bool:
         """Check if query violates plan goal boundary constraint."""
-        on_track = constraint.parameters.get("on_track", True)
-        return not on_track
-    
+        # If no plan goal, no violation possible
+        if not constraint.parameters.get("has_goal", True):
+            return False
+        
+        plan_goal = constraint.parameters.get("plan_goal")
+        if not plan_goal:
+            return False
+        
+        goal_keywords = constraint.parameters.get("goal_keywords", [])
+        if not goal_keywords:
+            return False
+        
+        # Check alignment
+        alignment = self._calculate_goal_alignment(query, plan_goal, goal_keywords)
+        
+        # Violation: very low alignment (< 0.2) indicates query has drifted from plan goal
+        return alignment < 0.2
+    # ---------------------------
+    # Helpers
+    # ---------------------------
+
     def _extract_goal_keywords(self, plan_goal: str) -> List[str]:
-        """Extract key terms from plan goal."""
-        # Remove common stop words
-        stop_words = {"what", "is", "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by"}
-        
-        # Tokenize
-        words = re.findall(r'\b\w+\b', plan_goal.lower())
-        
-        # Filter and return meaningful keywords
+        """
+        Extract coarse goal keywords.
+
+        NOTE:
+        - This is intentionally simple.
+        - Fine-grained semantics do NOT belong here.
+        """
+        stop_words = {
+            "what", "is", "the", "a", "an", "and", "or", "but",
+            "in", "on", "at", "to", "for", "of", "with", "by"
+        }
+
+        words = re.findall(r"\b\w+\b", plan_goal.lower())
         keywords = [
-            word for word in words
-            if word not in stop_words and len(word) > 2
+            w for w in words
+            if w not in stop_words and len(w) > 2
         ]
-        
-        return keywords[:10]  # Top 10 keywords
-    
+
+        return keywords[:8]  # coarse, bounded
+
     def _calculate_goal_alignment(
         self,
         query: str,
         plan_goal: str,
         goal_keywords: List[str]
     ) -> float:
-        """Calculate how well query aligns with plan goal."""
+        """
+        Soft alignment score ∈ [0, 1].
+
+        Used ONLY to scale boundary strength.
+        """
         if not goal_keywords:
-            return 0.5  # Neutral if no keywords
-        
+            return 0.5
+
         query_lower = query.lower()
-        goal_lower = plan_goal.lower()
-        
-        # Count matching keywords
-        matching_keywords = sum(
-            1 for keyword in goal_keywords
-            if keyword in query_lower
+
+        matches = sum(
+            1 for kw in goal_keywords
+            if kw in query_lower
         )
-        
-        # Check for goal-related concepts
-        goal_concepts = self._extract_concepts(goal_lower)
-        query_concepts = self._extract_concepts(query_lower)
-        
-        concept_overlap = len(set(goal_concepts) & set(query_concepts))
-        max_concepts = max(len(goal_concepts), len(query_concepts), 1)
-        concept_alignment = concept_overlap / max_concepts
-        
-        # Combined alignment score
-        keyword_alignment = min(1.0, matching_keywords / 3.0)  # At least 3 keywords = full
-        alignment = (keyword_alignment + concept_alignment) / 2.0
-        
-        return alignment
-    
-    def _extract_concepts(self, text: str) -> List[str]:
-        """Extract key concepts from text."""
-        # Simple concept extraction (can be enhanced)
-        # Look for noun phrases, entities, etc.
-        concepts = []
-        
-        # Extract capitalized sequences (potential entities)
-        capitalized = re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', text)
-        concepts.extend(capitalized)
-        
-        # Extract important noun phrases (simple heuristic)
-        # This is a simplified version - can be enhanced with NLP
-        return concepts[:5]  # Top 5 concepts
+
+        # Normalize gently — avoid hard jumps
+        return min(1.0, matches / max(len(goal_keywords), 3))
