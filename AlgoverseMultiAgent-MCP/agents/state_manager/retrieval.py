@@ -231,6 +231,21 @@ async def _entropy_aware_retrieve(
         "diffusion_penalty": diffusion_val  # ✅ FIX: Use extracted value
     }
 
+    # Early-hop recall bump when entropy collapsed
+    try:
+        hop_num = int(getattr(flow_snapshot, "hop", 1) if flow_snapshot else 1)
+    except Exception:
+        hop_num = 1
+    if entropy_val == 0.0 and hop_num <= 2:
+        old_k = retrieval_input["k"]
+        old_min_sim = retrieval_input["min_similarity"]
+        retrieval_input["k"] = max(int(retrieval_input.get("k") or 0), 15)
+        retrieval_input["min_similarity"] = max(0.1, old_min_sim * 0.8)
+        logger.debug(
+            f"🚀 Early-hop recall bump: hop={hop_num}, entropy=0.0 → "
+            f"k {old_k}->{retrieval_input['k']}, min_sim {old_min_sim:.3f}->{retrieval_input['min_similarity']:.3f}"
+        )
+
     # Force exploration only when entropy is "collapsed" AND state/evidence is weak.
     if entropy_val < EPS_ENTROPY_FLOOR and (belief_count < MIN_BELIEF_COUNT or evidence_density_low):
         old_k = retrieval_input["k"]
@@ -278,6 +293,27 @@ async def _entropy_aware_retrieve(
         docs = result.metadata.get("documents", []) or []
         stabilized_query = stabilized_query_retry
     
+    # ✅ CONTROL-LAYER FIX (Recall): If still no docs, reuse previous stabilized query with looser min_similarity and larger k.
+    if len(docs) == 0:
+        prev_stabilized = getattr(self, "_last_stabilized_query", None)
+        if prev_stabilized and str(prev_stabilized).strip():
+            fallback_input = dict(retrieval_input)
+            fallback_input["query"] = str(prev_stabilized)
+            # Loosen min_similarity moderately to improve recall
+            ms = float(fallback_input.get("min_similarity", 0.2))
+            fallback_input["min_similarity"] = max(0.1, ms * 0.7)
+            # Increase k for broader search
+            fallback_input["k"] = max(int(fallback_input.get("k") or 0), 15)
+
+            logger.debug(
+                f"🔁 Recall fallback: docs still 0 → retry with prev_stabilized='{fallback_input['query'][:120]}', "
+                f"k={fallback_input['k']}, min_sim={fallback_input['min_similarity']:.3f}"
+            )
+
+            result = await retriever_agent.process(fallback_input)
+            docs = result.metadata.get("documents", []) or []
+            stabilized_query = fallback_input["query"]
+
     logger.debug(
         f"Entropy-aware retrieval: query='{stabilized_query}', "
         f"k={retrieval_input.get('k')}, min_similarity={retrieval_input.get('min_similarity')}, "

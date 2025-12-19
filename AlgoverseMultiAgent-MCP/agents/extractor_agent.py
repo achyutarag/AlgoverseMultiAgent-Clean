@@ -415,6 +415,28 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
                 # Sort passages by relevance (highest first)
                 valid_passages.sort(key=lambda x: x["relevance"], reverse=True)
                 
+                # Retry once if no passages but documents exist (recall/answerability bump)
+                if not valid_passages and documents:
+                    retry_docs = documents[: min(len(documents), 20)]
+                    retry_input = dict(extractor_input)
+                    retry_input["documents"] = retry_docs
+                    retry_input["min_relevance"] = 0.1  # loosen threshold
+                    retry_input["max_documents"] = len(retry_docs)
+
+                    logger.info(
+                        f"Retrying extraction with {len(retry_docs)} docs, "
+                        f"min_relevance={retry_input['min_relevance']}"
+                    )
+
+                    retry_response = await self.process(retry_input)
+                    try:
+                        retry_data = json.loads(
+                            TokenizationUtils.strip_markdown_json(retry_response.content)
+                        )
+                        valid_passages = retry_data.get("extracted_passages", [])
+                    except Exception:
+                        valid_passages = []
+                
                 # Fallback: If no passages were extracted, create one from aggregated evidence
                 if not valid_passages and result.get("aggregated_evidence"):
                     logger.warning("No passages extracted, creating fallback passage from aggregated evidence")

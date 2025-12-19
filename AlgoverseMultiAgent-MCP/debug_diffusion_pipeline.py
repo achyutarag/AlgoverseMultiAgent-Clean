@@ -18,6 +18,9 @@ import json
 import logging
 import os
 import sys
+import difflib
+import re
+import numpy as np
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional
@@ -39,6 +42,118 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _qtokens(s: str) -> List[str]:
+    """Tokenize for cheap oscillation metrics (stable across punctuation/whitespace)."""
+    if not s:
+        return []
+    return re.findall(r"[a-z0-9]+", str(s).lower())
+
+
+def compute_query_oscillation_metrics(
+    prev_stabilized: Optional[str],
+    proposed: str,
+    stabilized: str,
+) -> Dict[str, Any]:
+    """
+    Observation-only: measure how much queries move.
+
+    - Within-hop: proposed -> stabilized
+    - Across-hop: prev_stabilized -> stabilized (oscillation / drift proxy)
+    """
+    # Strip bracketed placeholders to avoid template noise (e.g., "[ANSWER FROM ...]")
+    def strip_placeholders(text: str) -> str:
+        return re.sub(r"\[[^\]]+\]", " ", str(text or ""))
+
+    p = strip_placeholders(proposed)
+    s = strip_placeholders(stabilized)
+    prev = strip_placeholders(prev_stabilized) if prev_stabilized is not None else ""
+
+    pt = set(_qtokens(p))
+    st = set(_qtokens(s))
+    prevt = set(_qtokens(prev))
+
+    def jaccard(a: set, b: set) -> float:
+        if not a and not b:
+            return 1.0
+        return len(a & b) / max(1, len(a | b))
+
+    within_j = jaccard(pt, st)
+    across_j = jaccard(prevt, st) if prev_stabilized is not None else None
+
+    within_seq = difflib.SequenceMatcher(None, p.lower(), s.lower()).ratio()
+    across_seq = (
+        difflib.SequenceMatcher(None, prev.lower(), s.lower()).ratio()
+        if prev_stabilized is not None
+        else None
+    )
+
+    prev_added = list(st - prevt) if prev_stabilized is not None else []
+    prev_removed = list(prevt - st) if prev_stabilized is not None else []
+
+    return {
+        "prev_stabilized_present": prev_stabilized is not None and bool(prev.strip()),
+        "lengths": {
+            "proposed_chars": len(p),
+            "stabilized_chars": len(s),
+            "prev_stabilized_chars": len(prev) if prev_stabilized is not None else 0,
+            "proposed_token_set_size": len(pt),
+            "stabilized_token_set_size": len(st),
+            "prev_stabilized_token_set_size": len(prevt) if prev_stabilized is not None else 0,
+        },
+        "within_hop": {
+            "token_jaccard": within_j,
+            "token_jaccard_distance": 1.0 - within_j,
+            "sequence_ratio": within_seq,
+            "tokens_added": list(st - pt),
+            "tokens_removed": list(pt - st),
+            "tokens_added_count": len(st - pt),
+            "tokens_removed_count": len(pt - st),
+        },
+        "across_hop": None
+        if prev_stabilized is None
+        else {
+            "token_jaccard": across_j,
+            "token_jaccard_distance": (1.0 - across_j) if across_j is not None else None,
+            "sequence_ratio": across_seq,
+            "tokens_added": prev_added,
+            "tokens_removed": prev_removed,
+            "tokens_added_count": len(prev_added),
+            "tokens_removed_count": len(prev_removed),
+            "token_flip_rate": (len(prev_added) + len(prev_removed)) / max(1, len(prevt)),
+        },
+    }
+
+
+def _embed_query_for_velocity(retriever, text: str) -> Optional[np.ndarray]:
+    """Embed query using retriever embeddings; returns None on failure."""
+    if not retriever or not text:
+        return None
+    try:
+        if hasattr(retriever, "embeddings"):
+            vec = retriever.embeddings.embed_query(text)
+            return np.array(vec, dtype=float)
+    except Exception:
+        return None
+    return None
+
+
+def compute_set_jaccard(a: List[str], b: List[str]) -> Dict[str, Any]:
+    """Compute Jaccard similarity/distance between two (string) lists."""
+    sa = set(a or [])
+    sb = set(b or [])
+    if not sa and not sb:
+        return {"jaccard": 1.0, "jaccard_distance": 0.0, "intersection": [], "union_size": 0}
+    inter = sa & sb
+    union = sa | sb
+    j = len(inter) / max(1, len(union))
+    return {
+        "jaccard": j,
+        "jaccard_distance": 1.0 - j,
+        "intersection": list(inter),
+        "union_size": len(union),
+    }
 
 
 class ReasoningTrace:
@@ -420,7 +535,16 @@ _capture_state = {
     'qa_answer': '',
     'qa_confidence': 0.0,
     # ✅ NEW: Per-call debug metadata from stabilize_and_retrieve (e.g., query repair)
-    'debug_metadata': {}
+    'debug_metadata': {},
+    # ✅ PHASE 1: Previous stabilized query for cross-hop oscillation metrics (per trace)
+    'prev_stabilized_query': None,
+    # ✅ PHASE 1b: Retrieved neighborhood tracking (per trace)
+    'retrieved_doc_ids': [],
+    'retrieved_doc_scores': [],
+    'prev_retrieved_doc_ids': [],
+    # ✅ Velocity tracking (debug-only)
+    'prev_query_embedding': None,
+    'velocity_history': [],
 }
 
 
@@ -534,11 +658,26 @@ def patch_retriever_for_debugging(retriever):
         except Exception:
             _capture_state['retrieval_results']['min_similarity_actual'] = min_sim
 
-        if docs:
-            similarities = [doc.get("similarity", 0.0) for doc in docs if "similarity" in doc]
-            if similarities:
-                _capture_state['retrieval_results']['top_similarity'] = max(similarities)
-                _capture_state['retrieval_results']['avg_similarity'] = sum(similarities) / len(similarities)
+        # ✅ PHASE 1b: Capture top doc IDs (neighborhood) + their scores for overlap analysis
+        doc_ids = []
+        doc_scores = []
+        for d in docs:
+            if not isinstance(d, dict):
+                continue
+            doc_id = d.get("id") or (d.get("metadata", {}) or {}).get("id")
+            if doc_id:
+                doc_ids.append(str(doc_id))
+            # RetrieverAgent uses "score" (enhanced similarity) rather than "similarity"
+            if "score" in d and isinstance(d.get("score"), (int, float)):
+                doc_scores.append(float(d["score"]))
+
+        _capture_state["retrieved_doc_ids"] = doc_ids[: max(0, int(k) if k is not None else 0)] if doc_ids else []
+        _capture_state["retrieved_doc_scores"] = doc_scores[: len(_capture_state["retrieved_doc_ids"])] if doc_scores else []
+
+        # Also fill similarity stats from "score" if present (fixes prior always-0 fields)
+        if doc_scores:
+            _capture_state['retrieval_results']['top_similarity'] = max(doc_scores)
+            _capture_state['retrieval_results']['avg_similarity'] = sum(doc_scores) / len(doc_scores)
         
         _capture_state['retrieval_results']['k_used'] = len(docs)
         _capture_state['retrieval_results']['doc_count'] = len(docs)
@@ -649,6 +788,131 @@ def patch_orchestrator_for_debugging(orchestrator):
                         'hop': anchor_data.get('hop', hop)
                     })
         
+        # ✅ PHASE 1: Query oscillation metrics (observation only)
+        try:
+            prev = _capture_state.get("prev_stabilized_query", None)
+            proposed_q = _capture_state.get("proposed_query", "") or ""
+            stabilized_q = _capture_state.get("stabilized_query", "") or ""
+
+            oscillation = compute_query_oscillation_metrics(
+                prev_stabilized=prev,
+                proposed=proposed_q,
+                stabilized=stabilized_q,
+            )
+
+            dm = _capture_state.get("debug_metadata", {})
+            if not isinstance(dm, dict):
+                dm = {}
+            dm["oscillation"] = oscillation
+            _capture_state["debug_metadata"] = dm
+
+            # Update baseline for next hop within the same trace
+            _capture_state["prev_stabilized_query"] = stabilized_q
+        except Exception as _e:
+            dm = _capture_state.get("debug_metadata", {})
+            if not isinstance(dm, dict):
+                dm = {}
+            dm["oscillation_error"] = str(_e)
+            _capture_state["debug_metadata"] = dm
+
+        # ✅ PHASE 1b: kNN neighborhood coherence (observation only)
+        try:
+            current_ids = _capture_state.get("retrieved_doc_ids", []) or []
+            prev_ids = _capture_state.get("prev_retrieved_doc_ids", []) or []
+
+            overlap = compute_set_jaccard(prev_ids, current_ids) if prev_ids else None
+
+            # Neighborhood alert (observation only)
+            alert = None
+            if current_ids is not None and len(current_ids) == 0:
+                alert = "empty_retrieval"
+            elif overlap and overlap.get("jaccard", 1.0) < 0.2:
+                alert = "low_overlap"
+
+            dm = _capture_state.get("debug_metadata", {})
+            if not isinstance(dm, dict):
+                dm = {}
+            dm["neighborhood"] = {
+                "k_current": len(current_ids),
+                "k_prev": len(prev_ids),
+                "doc_ids_current": current_ids[:25],  # cap for report size
+                "doc_ids_prev": prev_ids[:25],        # cap for report size
+                "overlap_with_prev": overlap,
+                "neighborhood_alert": alert,
+            }
+            _capture_state["debug_metadata"] = dm
+
+            # Update baseline for next hop within the same trace
+            _capture_state["prev_retrieved_doc_ids"] = list(current_ids)
+        except Exception as _e:
+            dm = _capture_state.get("debug_metadata", {})
+            if not isinstance(dm, dict):
+                dm = {}
+            dm["neighborhood_error"] = str(_e)
+            _capture_state["debug_metadata"] = dm
+
+        # ✅ Velocity (debug-only): compute delta and direction consistency
+        try:
+            stabilized_q = _capture_state.get("stabilized_query", "") or ""
+            curr_emb = _embed_query_for_velocity(getattr(self, "retriever", None), stabilized_q)
+            prev_emb = _capture_state.get("prev_query_embedding", None)
+
+            delta_vec = None
+            delta_norm = None
+            direction_cosine = None
+
+            if curr_emb is not None and prev_emb is not None and len(curr_emb) == len(prev_emb):
+                delta_vec = curr_emb - prev_emb
+                delta_norm = float(np.linalg.norm(delta_vec))
+
+                # Direction cosine vs last delta (if available)
+                vh = _capture_state.get("velocity_history", []) or []
+                if vh:
+                    last_delta = vh[-1]
+                    if last_delta is not None and len(last_delta) == len(delta_vec):
+                        denom = (np.linalg.norm(last_delta) * np.linalg.norm(delta_vec))
+                        if denom > 0:
+                            direction_cosine = float(np.dot(last_delta, delta_vec) / denom)
+
+                # Maintain small history
+                vh.append(delta_vec)
+                _capture_state["velocity_history"] = vh[-3:]
+
+            # Oscillation flag from velocity (if direction flips)
+            oscillating = (direction_cosine is not None and direction_cosine < 0)
+
+            dm = _capture_state.get("debug_metadata", {})
+            if not isinstance(dm, dict):
+                dm = {}
+            dm["velocity"] = {
+                "delta_norm": delta_norm,
+                "direction_cosine": direction_cosine,
+                "oscillating": oscillating,
+                "has_embedding": curr_emb is not None,
+            }
+            _capture_state["debug_metadata"] = dm
+
+            # Update embedding baseline
+            _capture_state["prev_query_embedding"] = curr_emb
+
+            # Also add a coarse oscillation flag from across-hop drift if available
+            osc = dm.get("oscillation", {}) if isinstance(dm, dict) else {}
+            across = osc.get("across_hop") if isinstance(osc, dict) else None
+            drift_oscillating = False
+            if across and across.get("token_jaccard_distance") is not None:
+                drift_oscillating = across["token_jaccard_distance"] > 0.5
+            dm.setdefault("oscillation_flags", {})
+            if isinstance(dm["oscillation_flags"], dict):
+                dm["oscillation_flags"]["drift_oscillating"] = drift_oscillating
+            _capture_state["debug_metadata"] = dm
+
+        except Exception as _e:
+            dm = _capture_state.get("debug_metadata", {})
+            if not isinstance(dm, dict):
+                dm = {}
+            dm["velocity_error"] = str(_e)
+            _capture_state["debug_metadata"] = dm
+
         # Capture hop trace
         try:
             debugger.capture_hop(
@@ -679,6 +943,8 @@ def patch_orchestrator_for_debugging(orchestrator):
         _capture_state['retrieval_results'] = {}
         _capture_state['anchor_decisions'] = []
         _capture_state['debug_metadata'] = {}
+        _capture_state['retrieved_doc_ids'] = []
+        _capture_state['retrieved_doc_scores'] = []
         
         return result
     
@@ -704,12 +970,7 @@ async def debug_evaluate_dataset(dataset_name: str, num_examples: int = 5):
     # Create orchestrator
     from agents.mixed_model_orchestrator import create_optimized_marag_pipeline
     
-    orchestrator = await create_optimized_marag_pipeline()
-    
-    # Patch for debugging
-    orchestrator = patch_orchestrator_for_debugging(orchestrator)
-    
-    # Evaluate each example
+    # Evaluate each example (recreate orchestrator per example to avoid cross-question retriever contamination)
     for i, example in enumerate(eval_examples, 1):
         question = example.get('question', '')
         ground_truth = example.get('answer', '')
@@ -717,9 +978,20 @@ async def debug_evaluate_dataset(dataset_name: str, num_examples: int = 5):
         print(f"\n{'='*80}")
         print(f"Question {i}/{len(eval_examples)}: {question[:60]}...")
         print(f"{'='*80}")
+
+        # Recreate orchestrator for this example
+        orchestrator = await create_optimized_marag_pipeline()
+        orchestrator = patch_orchestrator_for_debugging(orchestrator)
         
         # Start trace
         debugger.start_trace(question, ground_truth)
+        # ✅ PHASE 1: reset per-trace oscillation baseline (avoid leakage between questions)
+        _capture_state["prev_stabilized_query"] = None
+        # ✅ PHASE 1b: reset per-trace neighborhood baseline (avoid leakage between questions)
+        _capture_state["prev_retrieved_doc_ids"] = []
+        # ✅ Velocity reset per trace
+        _capture_state["prev_query_embedding"] = None
+        _capture_state["velocity_history"] = []
         
         try:
             # Load documents
