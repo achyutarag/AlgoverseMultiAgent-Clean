@@ -284,6 +284,40 @@ class RetrieverAgent(BaseAgent):
                         logger.debug(f"   [{i+1}] (sim={doc_data['score']:.3f}) {preview}...")
             else:
                 logger.warning(f"⚠️  No documents passed threshold (min_sim={min_similarity})")
+
+            # --- Non-zero docs floor (deterministic) ---
+            metadata_floor = {
+                "low_similarity_floor": False,
+                "filtered_count": filtered_count,
+                "k_requested": k,
+                "k_actual": len(results),
+                "min_similarity_effective": min_similarity,
+            }
+            if not results and docs_and_scores:
+                # Take top by base similarity (ignore min_similarity/regulator filters)
+                fallback = sorted(
+                    [(doc, 1.0 / (1.0 + score)) for doc, score in docs_and_scores],
+                    key=lambda x: x[1],
+                    reverse=True
+                )
+                # Align floor with K_MIN-style floor (5)
+                take = min(len(fallback), max(int(input_data.get("k", self.top_k) or 0), 5))
+                fallback = fallback[:take]
+                for doc, base_sim in fallback:
+                    doc_id = doc.metadata.get('id', f"doc_{len(results)+1}")
+                    doc.metadata['id'] = doc_id
+                    doc_data = {
+                        "id": doc_id,
+                        "page_content": doc.page_content,
+                        "metadata": doc.metadata,
+                        "score": float(base_sim) if include_scores else None
+                    }
+                    results.append(doc_data)
+                    similarities.append(base_sim)
+                metadata_floor.update({
+                    "low_similarity_floor": True,
+                    "k_actual": len(results),
+                })
             
             # Update history
             self._update_history("user", f"Retrieve documents for: {query}")
@@ -322,6 +356,7 @@ class RetrieverAgent(BaseAgent):
                 },
                 "documents": results
             }
+            metadata.update(metadata_floor)
             
             # Add entropy-aware metadata if enabled
             if is_entropy_aware:

@@ -182,6 +182,10 @@ class EntityRegulator(BaseRegulator):
         # Filter entities based on hierarchical level requirement
         filtered = []
         for entity in entities:
+            entity_lower = entity.lower().strip()
+            if entity_lower in {"yes", "unknown", "none", "n/a"}:
+                logger.debug(f"EntityRegulator: Skipping non-entity token '{entity}'")
+                continue
             # Classify entity's hierarchical level using GranularityRegulator
             entity_domain, entity_level, _ = granularity_reg.classify_entity_level(entity)
             

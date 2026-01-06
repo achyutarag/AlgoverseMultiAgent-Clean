@@ -1,0 +1,29 @@
+Question,Prediction,Ground_Truth,ExactMatch,F1Score,Latency(s),Total_Tokens,Input_Tokens,Output_Tokens
+Who is the spouse of the Green performer?,Miquette Giraudy,Miquette Giraudy,1.0,1.0,76.46,44869,30573,2662
+Who founded the company that distributed the film UHF?,Morris Mike Medavoy,Mike Medavoy,0.0,0.8,79.92,48780,33673,2326
+What administrative territorial entity is the owner of Ciudad Deportiva located?,The Municipality of Nuevo Laredo is located in the Mexican,Tamaulipas,0.0,0.0,124.65,59668,34445,2886
+Where is Ulrich Walter's employer headquartered?,Unknown,Cologne,0.0,0.0,63.84,42045,30693,2212
+Which company owns the manufacturer of Learjet 60?,Bombardier Inc,Bombardier Inc.,1.0,1.0,37.53,22961,17009,1382
+Who is the child of Caroline LeRoy's spouse?,Daniel Fletcher Webster,Fletcher Webster,0.0,0.8,99.05,63299,44950,2466
+"Who is the grandmother of Philippe, Duke of Orléans?",Louis,Marie de' Medici,0.0,0.0,81.10,64702,49622,3761
+What is the goal of the group that European Movement Germany is a member of?,"Promoting European integration, and disseminating information about it",European integration,0.0,0.4,54.01,40932,31640,2153
+What company succeeded the owner of Empire Sports Network?,Time Warner Cable,Time Warner Cable,1.0,1.0,71.59,47813,34801,2386
+What province shares a border with the province where Lago District is located?,Cabo Delgado Province,Cabo Delgado Province,1.0,1.0,73.38,46321,32488,2032
+What league does the team that plays in Stadio Ciro Vigorito play for?,Lega Pro Prima Divisione,Lega Pro Prima Divisione,1.0,1.0,60.21,42204,31739,2082
+What is a notable work written by the author of The Timothy files?,The Anderson Tapes,Anderson Tapes,1.0,1.0,67.16,44190,31713,2575
+In which borough was Callum McManaman born?,Metropolitan Borough of Knowsley,Knowsley,0.0,0.4,37.83,22780,16430,1357
+What other county does the county where Imperial is located share a border with?,Crockett County,Crockett County,1.0,1.0,90.49,50009,32720,2483
+In what county is William W. Blair's birthplace located?,Orleans County,Orleans County,1.0,1.0,95.22,53548,35355,2332
+What award did the author of The Red Tree receive?,Unknown,Academy Award for Best Animated Short Film,0.0,0.0,66.78,43146,31613,1864
+Where was Tyler MacDuff's child educated?,Blair International Baccalaureate School,Blair High School,0.0,0.5714285714285715,56.12,28729,18410,2030
+Who is the spouse of the Rabbit Hole's producer?,Keith Urban,Keith Urban,1.0,1.0,140.70,71075,44017,3312
+Who is the child of Sigrid Eskilsdotter's child?,King Gustav Vasa,Svante Stensson Sture,0.0,0.0,152.83,76999,44440,3920
+In which county is Kimbrough Memorial Stadium located?,Randall County,Randall County,1.0,1.0,70.99,40194,27152,1990
+
+Summary,,,,,,,,
+Exact Match,,,0.5000,,,,,
+F1 Score,,,0.6486,,,,,
+Latency/Q (s),,,79.99,,,,,
+Total Latency (s),,,1599.87,,,,,
+Tokens/Q,,,47713,,,47713,32674,2411
+Examples,,,20,,,,,

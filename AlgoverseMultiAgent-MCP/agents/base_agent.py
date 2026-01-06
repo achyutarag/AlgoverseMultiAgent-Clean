@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Any, List, Optional, Union
 from pydantic import BaseModel, Field
+import random
+import numpy as np
 from .llm_wrapper import LLMConfig, get_llm
 
 class AgentResponse(BaseModel):
@@ -26,7 +28,9 @@ class BaseAgent(ABC):
             model_config = {
                 "model_name": model_name,
                 "model_type": "google_gemini",  # Default to google_gemini
-                "temperature": 0.7,
+                "temperature": 0.0,  # deterministic default
+                "top_p": 1.0,
+                "seed": 1234,
                 "max_new_tokens": 1024,
                 "use_quantization": True,
                 "load_in_4bit": True
@@ -34,6 +38,11 @@ class BaseAgent(ABC):
         elif isinstance(model_config, dict) and "model_name" in model_config:
             self.model_name = model_config["model_name"]
         
+        # Seed PRNGs for deterministic runs if seed provided
+        seed_val = model_config.get("seed") if isinstance(model_config, dict) else getattr(model_config, "seed", None)
+        if seed_val is not None:
+            random.seed(seed_val)
+            np.random.seed(seed_val)
         self.llm = get_llm(model_config)
     
     @abstractmethod

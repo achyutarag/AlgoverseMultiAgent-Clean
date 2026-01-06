@@ -16,7 +16,8 @@ def _update_flow_state(
     self,
     hop: int,
     previous_answers: Dict[str, Any],
-    plan_goal: Optional[str] = None
+    plan_goal: Optional[str] = None,
+    protected_answer_manager: Optional[Any] = None
 ) -> Optional[Any]:
     """
     Update reasoning flow state for current hop.
@@ -45,6 +46,10 @@ def _update_flow_state(
             execution_state.validated_anchors = {}
         if not hasattr(execution_state, "revoked_anchors") or execution_state.revoked_anchors is None:
             execution_state.revoked_anchors = []
+        # ✅ DEPRECATED: Protected answers are now managed by ProtectedAnswerManager
+        # Keep for backward compatibility but mark as deprecated
+        if not hasattr(execution_state, "protected_answers") or execution_state.protected_answers is None:
+            execution_state.protected_answers = "<DEPRECATED: use ProtectedAnswerManager>"
 
         # ✅ PERSISTENCE RULE: carry forward all validated anchors unchanged by default
         # This enforces: validated_anchors[t+1] ⊇ validated_anchors[t] \ revoked_anchors[t+1]
@@ -53,6 +58,17 @@ def _update_flow_state(
                 f"[Anchors] Carrying forward validated anchor '{anchor_name}' unchanged into hop {hop}"
             )
     
+    # ✅ READ-ONLY: Check protected answers from manager (no mutations)
+    # flow_update may read protected answers, reason about anchors, log conflicts
+    # It must NOT write - all writes go through ProtectedAnswerManager.propose_candidates()
+    if protected_answer_manager:
+        protected_answers = protected_answer_manager.get_protected_answers()  # read-only
+        # Log conflicts or use for anchor reasoning if needed
+        if protected_answers:
+            logger.debug(f"[ProtectedAnswer] Read-only check: {len(protected_answers)} protected slots available")
+    else:
+        protected_answers = {}
+
     # Extract beliefs from previous answers
     beliefs = _extract_beliefs(self, previous_answers)
     
@@ -139,6 +155,8 @@ def _update_flow_state(
     entropy = current_state.entropy if current_state else 0.0
     confidence = current_state.confidence if current_state else 0.5
     
+    protected_context = getattr(self, "_protected_anchors", {})
+
     for entity, anchor_data in entity_anchors.items():
         # ✅ FIX: Use anchor's own confidence from anchor_data, not flow state aggregate
         # The anchor's confidence (from QA's posterior) is stored in anchor_data["strength"]
@@ -150,7 +168,8 @@ def _update_flow_state(
             anchor_data=anchor_data,
             entropy=entropy,
             confidence=anchor_confidence,  # ✅ FIX: Use anchor's own confidence, not flow state
-            plan_goal=plan_goal
+            plan_goal=plan_goal,
+            protected_context=protected_context
         ):
             # Entropy-aware strength: High entropy = weaker, low entropy = stronger
             base_strength = anchor_data.get("strength", 0.8)
@@ -470,7 +489,8 @@ def _should_create_anchor(
     anchor_data: Dict[str, Any],
     entropy: float,
     confidence: float,
-    plan_goal: Optional[str] = None
+    plan_goal: Optional[str] = None,
+    protected_context: Optional[Dict[str, Any]] = None
 ) -> bool:
     """
     ✅ FIRST PRINCIPLES: Quality check before creating anchor.
@@ -498,14 +518,39 @@ def _should_create_anchor(
             logger.debug(f"Anchor quality check: '{entity}' is invalid evidence term")
             return False
     
-    # Check 2: Confidence and entropy thresholds
-    # High confidence (>= 0.7) AND low entropy (<= 0.3) = certain, high-quality evidence
+    # Check 2: Confidence and entropy thresholds (with protected relax)
+    protected = set()
+    protected_step = None
+    current_step_id = getattr(self, "current_step_id", None)
+    if protected_context:
+        protected = set(protected_context.get("anchors") or [])
+        protected_step = protected_context.get("step_id")
+    norm = lambda s: re.sub(r"\s+", " ", s.strip().lower()) if s else ""
+    entity_norm = norm(entity)
+    is_protected = (
+        entity_norm in protected
+        and protected_step
+        and current_step_id
+        and protected_step == current_step_id
+    )
+    # Minimal contradiction guard: if another protected anchor exists with different norm, do not relax
+    contradiction = False
+    if is_protected and len(protected) > 1:
+        for a in protected:
+            if a != entity_norm:
+                contradiction = True
+                break
+
+    entropy_threshold = 0.3
+    if is_protected and not contradiction:
+        entropy_threshold = 1.2
+
     if confidence < 0.7:
         logger.debug(f"Anchor quality check: '{entity}' confidence too low ({confidence:.3f} < 0.7)")
         return False
     
-    if entropy > 0.3:
-        logger.debug(f"Anchor quality check: '{entity}' entropy too high ({entropy:.3f} > 0.3)")
+    if entropy > entropy_threshold:
+        logger.debug(f"Anchor quality check: '{entity}' entropy too high ({entropy:.3f} > {entropy_threshold:.3f})")
         return False
     
     # Check 3: Boundary condition (answer satisfies query, not in input space)
@@ -569,4 +614,30 @@ def _calculate_entropy_aware_strength(
     )
     
     return adjusted_strength
+
+def is_valid_span(ans: str) -> bool:
+    """Layer-1 validity gate to filter junk/placeholder answers before storage."""
+    if not ans:
+        return False
+    norm = " ".join(re.sub(r"[^\w\s]", " ", str(ans).lower()).split())
+    if not norm:
+        return False
+    confirmations = {"yes", "no", "unknown", "none", "n/a", "na", ""}
+    if norm in confirmations:
+        return False
+    articles = {"the", "a", "an"}
+    tokens = norm.split()
+    if all(tok in articles for tok in tokens):
+        return False
+    # Allow single proper nouns like "Cologne"; block only very short one-token junk
+    if len(tokens) < 2 and len(norm) < 6:
+        return False
+    return True
+
+def _normalize_answer(answer: str) -> str:
+    """Normalize answers for comparison (lowercase, strip punctuation/whitespace)."""
+    if not answer:
+        return ""
+    cleaned = re.sub(r"[^\w\s]", " ", str(answer).lower())
+    return " ".join(cleaned.split())
 

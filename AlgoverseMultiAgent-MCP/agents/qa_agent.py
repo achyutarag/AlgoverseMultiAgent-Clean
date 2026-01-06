@@ -24,6 +24,7 @@ class Answer(BaseModel):
         description="List of supporting evidence with text and source"
     )
     reasoning: str = Field("", description="Reasoning process for the answer")
+    evidence_term: Optional[str] = Field(None, description="Term actually used in evidence (e.g., 'partner' for 'spouse')")
 
 class QAAgent(BaseAgent):
     """
@@ -36,7 +37,7 @@ class QAAgent(BaseAgent):
         self, 
         model_config: Optional[Dict[str, Any]] = None,
         model_name: str = "gemini-2.5-flash",  # LLM for answer synthesis
-        temperature: float = 0.3,
+        temperature: float = 0.0,
         max_tokens: int = 1024
     ):
         """
@@ -48,124 +49,88 @@ class QAAgent(BaseAgent):
             temperature: Temperature for text generation (0.0-1.0)
             max_tokens: Maximum number of tokens to generate
         """
+        # deterministic defaults; enforce top_p=1.0
+        if model_config is None:
+            model_config = {
+                "model_name": model_name,
+                "model_type": "google_gemini",
+                "temperature": 0.0,
+                "top_p": 1.0,
+                "max_new_tokens": max_tokens,
+            }
+        else:
+            model_config = {**model_config, "temperature": 0.0, "top_p": 1.0}
+
         super().__init__("qa_agent", model_config, model_name)
-        self.temperature = max(0.0, min(1.0, temperature))
+        self.temperature = 0.0
         self.max_tokens = max(100, min(4096, max_tokens))
         self.conversation_history: List[Dict[str, str]] = []
         
-        self.system_prompt = """You are an extractive question-answering system. Your task is to extract answers directly from provided evidence.
+        self.system_prompt = """You are an extractive QA system. Use only the provided evidence.
 
-Your task is to:
-1. Extract the answer EXACTLY as it appears in the evidence
-2. Do NOT explain, paraphrase, or modify the wording
-3. Do NOT infer anything not explicitly in the evidence
-4. If the answer is not directly present, return "unknown"
-5. Return valid JSON
+Rules:
+- Extract the entity that fulfills the asked role according to the evidence, 
+  even if the evidence wording differs from the question (e.g., "partner" for 
+  "spouse", "founded" for "founder").
+- Copy the entity name exactly as written in the evidence.
+- Record the evidence term used (e.g., "partner", "wife", "husband") if it 
+  differs from the question role (e.g., "spouse").
+- Only return "unknown" if the evidence genuinely does not contain information 
+  that could answer the question.
+- No explanations. Return JSON only.
 
-Return a JSON object with this structure:
+Return JSON:
 {
-    "answer": "Extracted answer from evidence",
-    "confidence": 0.95,
-    "sources": ["source1", "source2"],
-    "supporting_evidence": [
-        {
-            "text": "Relevant text from evidence",
-            "source": "source_id",
-            "relevance": 0.9
-        }
-    ]
-}
+  "answer": "Entity Name",
+  "confidence": 0.9,
+  "sources": ["doc_id"],
+  "supporting_evidence": [
+    {"text": "...", "source": "doc_id", "relevance": 0.9}
+  ],
+  "evidence_term": "partner"  // Optional: the term actually used in evidence
+}"""
 
-**IMPORTANT**: Always return valid JSON. Do not include any text before or after the JSON object."""
+    def _infer_slot(self, question: str, step_context: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Infer semantic slot from question/step context.
+        Returns slot label like "spouse", "performer", "founder", "parent", etc.
+        """
+        if not question:
+            return "default"
+        
+        q_lower = question.lower()
+        
+        # Slot inference patterns
+        if any(kw in q_lower for kw in ["spouse", "wife", "husband", "married", "partner"]):
+            return "spouse"
+        elif any(kw in q_lower for kw in ["performer", "artist", "musician", "singer", "actor"]):
+            return "performer"
+        elif any(kw in q_lower for kw in ["founder", "founded", "created", "established"]):
+            return "founder"
+        elif any(kw in q_lower for kw in ["parent", "father", "mother", "dad", "mom"]):
+            return "parent"
+        elif any(kw in q_lower for kw in ["child", "son", "daughter", "offspring"]):
+            return "child"
+        elif any(kw in q_lower for kw in ["author", "writer", "wrote", "written by"]):
+            return "author"
+        elif any(kw in q_lower for kw in ["owner", "owns", "owned by"]):
+            return "owner"
+        elif any(kw in q_lower for kw in ["headquarters", "hq", "located", "based"]):
+            return "location"
+        elif any(kw in q_lower for kw in ["company", "organization", "corporation"]):
+            return "company"
+        else:
+            # Fallback: use step description if available
+            if step_context:
+                step_desc = step_context.get("description", "").lower()
+                if "spouse" in step_desc:
+                    return "spouse"
+                elif "performer" in step_desc or "artist" in step_desc:
+                    return "performer"
+            
+            return "default"
+
     
-    def _attempt_hierarchical_inference(
-        self,
-        question: str,
-        context: List[Dict[str, Any]],
-        required_domain: Optional[str],
-        required_level: Optional[str]
-    ) -> Optional[str]:
-        """
-        Attempt to infer parent-level entity when evidence contains lower-level entities.
-        
-        ✅ FIRST PRINCIPLES: When documents contain lower-level entities but query requires
-        higher-level, we should infer the parent entity from context rather than returning "unknown".
-        
-        This is generalized and works for any hierarchical domain (territorial, organizational, taxonomic).
-        
-        Args:
-            question: The question being answered
-            context: List of extracted passages/evidence
-            required_domain: Required hierarchical domain
-            required_level: Required hierarchical level name
-            
-        Returns:
-            Inferred parent entity name if found, None otherwise
-        """
-        if not required_domain or not required_level:
-            return None
-        
-        try:
-            from .regulators.granularity_regulator import GranularityRegulator
-            granularity_reg = GranularityRegulator()
-            
-            # Get required level number
-            required_level_num = granularity_reg.get_level_number(required_domain, required_level)
-            if not required_level_num:
-                return None
-            
-            # Get level keywords for the required level
-            level_keywords = granularity_reg._get_level_keywords(required_domain, required_level)
-            if not level_keywords:
-                return None
-            
-            # Search context for entities at required level
-            # Look for patterns where entities are mentioned with required level keywords
-            import re
-            for evidence_item in context:
-                evidence_text = evidence_item.get("text", "") if isinstance(evidence_item, dict) else str(evidence_item)
-                if not evidence_text:
-                    continue
-                
-                evidence_lower = evidence_text.lower()
-                
-                # Check if evidence contains required level keywords
-                for keyword in level_keywords:
-                    keyword_lower = keyword.lower()
-                    if keyword_lower in evidence_lower:
-                        # Try to extract entity name near the keyword
-                        # Pattern: look for capitalized words/phrases near the keyword
-                        # This works for patterns like "X is in Y state" or "Y state contains X"
-                        patterns = [
-                            # Pattern 1: "Entity [keyword]" or "[keyword] Entity"
-                            rf'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+{re.escape(keyword_lower)}\b',
-                            rf'\b{re.escape(keyword_lower)}\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b',
-                            # Pattern 2: "Entity, [keyword]" or "[keyword], Entity"
-                            rf'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*),\s*{re.escape(keyword_lower)}\b',
-                            rf'\b{re.escape(keyword_lower)},\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b',
-                            # Pattern 3: "X is in Y [keyword]" or "Y [keyword] contains X"
-                            rf'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+{re.escape(keyword_lower)}\s+(?:contains|has|owns|governs)',
-                            rf'\b(?:located|situated|found)\s+in\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+{re.escape(keyword_lower)}\b',
-                        ]
-                        
-                        for pattern in patterns:
-                            matches = re.findall(pattern, evidence_text, re.IGNORECASE)
-                            if matches:
-                                # Return the first match (most likely the parent entity)
-                                inferred = matches[0].strip()
-                                # Validate it's not a common word
-                                if inferred and len(inferred) > 2 and inferred.lower() not in ["the", "a", "an", "this", "that"]:
-                                    logger.debug(
-                                        f"QA Agent: Hierarchical inference found '{inferred}' "
-                                        f"using pattern with keyword '{keyword}'"
-                                    )
-                                    return inferred
-        except Exception as e:
-            logger.debug(f"QA Agent: Hierarchical inference failed: {str(e)}")
-        
-        return None
-
-
     async def process(self, input_data: Dict[str, Any]) -> AgentResponse:
         """
         Generate a step-specific answer using entropy-aware compression in a stabilized belief field.
@@ -335,352 +300,28 @@ Return a JSON object with this structure:
             )
         
         try:
-            # ====================================================================
-            # BUILD PROMPT WITH STABILIZED BELIEF FIELD CONTEXT
-            # ====================================================================
-            # The prompt includes diffusion state (H(t), D(t)), anchors, and constraints
-            # to guide entropy-aware compression
-            prompt = f"""{self.system_prompt}
-            
-### ====================================================================
-### DIFFUSION-AWARE CONTEXT (Stabilized Belief Field)
-### ====================================================================
-### Current Hop: {hop}
-### Entropy H(t): {entropy:.3f} ({'Low uncertainty' if entropy < 0.3 else 'Medium uncertainty' if entropy < 0.5 else 'High uncertainty'})
-### Diffusion D(t): {diffusion:.3f} ({'Low drift' if diffusion < 0.3 else 'Medium drift' if diffusion < 0.5 else 'High drift'})
-### Confidence: {confidence:.3f}
-### Compression Level: {compression_level.upper()}
-### Active Anchors: {len(anchors)} bucket anchors, {len(entity_anchors)} entity-specific anchors
-
-### Stabilized Query Used for Retrieval:
-{stabilized_query if stabilized_query else question}
-### ====================================================================
-
-### Subquery to Answer:
-{tokenization_utils.preprocess_llm_input(question)}
-
-### Step Context:
-{json.dumps(step_context, indent=2) if step_context else "No specific step context"}
-"""
-            
-            # Add anchor context for consistency (potential wells)
-            if anchors or entity_anchors:
-                prompt += "\n\n### ===================================================================="
-                prompt += "\n### ACTIVE ANCHORS (Fixed Points - Maintain Consistency)"
-                prompt += "\n### ===================================================================="
-                prompt += "\n**Anchors are fixed points (potential wells) that stabilize reasoning.**"
-                prompt += "\nYour answer should be consistent with these anchors to prevent drift.\n"
-                
-                for anchor in (anchors if isinstance(anchors, list) else []):
-                    anchor_entity = anchor.get('entity', '') if isinstance(anchor, dict) else (anchor.entity if hasattr(anchor, 'entity') else '')
-                    anchor_type = anchor.get('type', '') if isinstance(anchor, dict) else (anchor.type if hasattr(anchor, 'type') else '')
-                    if anchor_entity:
-                        prompt += f"- {anchor_entity} ({anchor_type})\n"
-                
-                for entity, anchor_data in (entity_anchors.items() if isinstance(entity_anchors, dict) else []):
-                    prompt += f"- {entity}: {str(anchor_data)[:100]}\n"
-                
-                prompt += "\n**CRITICAL**: Your answer must be consistent with these anchors.\n"
-                prompt += "If multiple answers exist, choose the one that aligns with anchors.\n"
-            
-            # Add regulator constraints (boundary conditions)
-            if regulator_constraints:
-                prompt += "\n### ===================================================================="
-                prompt += "\n### REGULATOR CONSTRAINTS (Boundary Conditions)"
-                prompt += "\n### ===================================================================="
-                prompt += "\n**Constraints from regulators guide reasoning boundaries.**\n"
-                for constraint in regulator_constraints[:3]:  # Top 3 constraints
-                    constraint_name = constraint.get('regulator_name', '') if isinstance(constraint, dict) else (constraint.regulator_name if hasattr(constraint, 'regulator_name') else '')
-                    constraint_type = constraint.get('constraint_type', '') if isinstance(constraint, dict) else (constraint.constraint_type if hasattr(constraint, 'constraint_type') else '')
-                    if constraint_name:
-                        prompt += f"- {constraint_name} ({constraint_type})\n"
-                prompt += "\n"
-            
-            # ✅ FIRST PRINCIPLES: Hierarchical Level Awareness in Entropy-Aware Compression
-            # ====================================================================
-            # The global boundary condition and initial condition (u(x,0)) sets the required hierarchical level.
-            # Entropy-aware compression must respect this constraint to minimize
-            # ambiguity. If evidence contains entities at different hierarchical
-            # levels, compress to the entity at the REQUIRED level.
-            # ====================================================================
-            
-
-            if required_hierarchical_level:
-                prompt += "\n### ===================================================================="
-                prompt += "\n### HIERARCHICAL LEVEL CONSTRAINT (Initial Condition - MUST RESPECT)"
-                prompt += "\n### ===================================================================="
-                prompt += f"\n**CRITICAL**: The query requires a {required_hierarchical_level} level entity"
-                if required_domain:
-                    prompt += f" (domain: {required_domain})"
-                prompt += ".\n\n**Entropy-Aware Compression Rule**:"
-                prompt += "\n- If evidence contains entities at DIFFERENT hierarchical levels, "
-                prompt += f"extract the entity at the {required_hierarchical_level} level (required level)."
-                prompt += "\n- DO NOT extract entities at wrong hierarchical levels."
-                prompt += "\n- This minimizes entropy by ensuring the answer respects the initial condition constraint."
-                prompt += "\n\n**How to Identify Entities at Required Level**:"
-                prompt += "\n- **KEY INSIGHT**: The entity name itself doesn't need to contain level keywords"
-                prompt += "\n- Look for entities mentioned WITH the required level keywords in the evidence"
-                prompt += "\n- Example: If state/province level is required and evidence says 'X Municipality is located in Y state' → Extract 'Y' (mentioned with 'state' keyword)"
-                prompt += "\n- Example: If state/province level is required and evidence says 'Y is the administrative territorial entity containing X' → Extract 'Y' (mentioned with 'administrative territorial entity')"
-                prompt += "\n- Example: If state/province level is required and evidence says 'City Municipality, State Name' → Extract 'State Name' (the one without municipality keyword)"
-                prompt += "\n- **Pattern Recognition**: Entities described with required level keywords (even if the entity name itself lacks those keywords) are at that level"
-                prompt += "\n\n**General Principle**:"
-                prompt += "\n- Hierarchical structures have levels (e.g., country > state > municipality, "
-                prompt += "company > division > team, kingdom > phylum > species, etc.)"
-                prompt += "\n- If the query requires level X, extract entities at level X, not level Y (higher or lower)."
-                prompt += "\n- When evidence contains multiple entities at different levels, identify which is at the required level by looking at how they're described in the evidence."
-                prompt += "\n\n**Examples (Generic Patterns)**:"
-                prompt += "\n- Evidence contains 'Entity A (lower level), Entity B (higher level)' → Extract Entity B if higher level is required"
-                prompt += "\n- Evidence contains 'Entity A (higher level), Entity B (lower level)' → Extract Entity A if higher level is required"
-                prompt += "\n- Evidence contains 'X is located in Y' where Y is described with required level keywords → Extract Y"
-                prompt += "\n- Evidence contains 'X is part of Y' where Y is described with required level keywords → Extract Y"
-                prompt += "\n\n**This is entropy-aware compression**: Compressing evidence to the correct hierarchical level "
-                prompt += "minimizes ambiguity (min H(final answer; evidence)) while respecting the initial condition.\n"
-            
-            # Add overall query context prominently at the top (if available)
+            # Build a concise extractive prompt
+            prompt_lines = [self.system_prompt]
+            prompt_lines.append(f"Question: {tokenization_utils.preprocess_llm_input(question)}")
             if overall_query:
-                prompt += f"\n\n### ORIGINAL QUESTION (USE TO GUIDE ANSWER FORMAT):\n{overall_query}\n"
-            
-            # Add previous answers if available (for context only, NOT to include in answer)
-            if previous_answers:
-                prompt += "\n\n### Previous Step Answers (FOR CONTEXT ONLY - DO NOT include these in your answer):"
-                for step_id, answer in previous_answers.items():
-                    answer_preview = str(answer)[:200] + "..." if len(str(answer)) > 200 else str(answer)
-                    prompt += f"\n- Step {step_id}: {answer_preview}"
-                prompt += "\n\nIMPORTANT: The previous step answers above are provided for context to help you understand the question. DO NOT include them in your answer. Answer ONLY what the current subquery asks for."
-            
-            # Add conversation history if available
-            if history:
-                history_str = "\n".join(
-                    f"{h.get('role', 'user').upper()}: {h.get('content', '')}"
-                    for h in history[-max_history:]
+                prompt_lines.append(f"Overall question (context): {tokenization_utils.preprocess_llm_input(overall_query)}")
+            if required_hierarchical_level or required_domain:
+                prompt_lines.append(
+                    f"Required level: {required_hierarchical_level or 'unspecified'}; "
+                    f"domain: {required_domain or 'unspecified'}"
                 )
-                prompt += f"\n### Previous Conversation (most recent last):\n{history_str}\n\n"
-            
-            # Add context documents with enhanced formatting
-            prompt += "\n### Extracted Evidence:"
+            prompt_lines.append("Evidence:")
             for i, doc in enumerate(context):
                 doc_id = doc.get('document_id', f'doc_{i+1}')
                 text = doc.get('text', '').strip()
                 relevance = doc.get('relevance', 0.0)
-                reasoning = doc.get('reasoning', '')
-                
-                prompt += (
-                    f"\n[Evidence {i+1}, Source: {doc_id}, Relevance: {relevance:.2f}]\n"
-                    f"Text: {text}\n"
-                    f"Reasoning: {reasoning}\n"
-                )
+                prompt_lines.append(f"- [source: {doc_id}, relevance: {relevance:.2f}] {text}")
             
-            
-            # Add general instruction for using evidence as-provided
-            prompt += "\n\n### ⚠️ IMPORTANT: Using Evidence As-Provided"
-            prompt += "\n- Extract answers DIRECTLY from the evidence provided above"
-            prompt += "\n- DO NOT reject or modify answers based on the year, date, or whether they match your world knowledge"
-            prompt += "\n- Use the information as it appears in the evidence, regardless of when it's from or whether it seems 'correct'"
-            prompt += "\n- If multiple pieces of evidence exist, use the one that most directly answers the question"
-            prompt += "\n- Your job is to extract the answer from the evidence, not to judge its recency, accuracy, or plausibility"
-            prompt += "\n- Trust the evidence's context over your general knowledge - the evidence is the source of truth"
-            prompt += "\n\n### ⚠️ CRITICAL: Trust Extractor's Contextual Matching"
-            prompt += "\n- The evidence provided above has ALREADY been contextually matched by the Extractor Agent"
-            prompt += "\n- DO NOT return 'unknown' just because words don't exactly match - the Extractor already handled contextual matching"
-            prompt += "\n- Extract the answer following the Answer Format Rules below"
-            
-            
-            # Add instructions for extraction
-            prompt += f"""
 
-### EXTRACTION INSTRUCTIONS:
-Using the question and evidence provided above:
 
-**CRITICAL: Detect Yes/No Questions Based on SUB-QUERY Format**
-- Check ONLY the subquery format (NOT the original question) to determine if this is a yes/no question
-- If the SUBQUERY starts with "Is", "Are", "Was", "Were", "Do", "Does", "Did", "Can", "Could", "Would", "Should", "Has", "Have", "Had" → This is a YES/NO question
-- For yes/no subqueries, you MUST return "Yes" or "No" based on whether the evidence confirms or denies the statement
-- For factual subqueries (e.g., "What is X's nationality?", "Find the use of Y"), extract the factual answer (e.g., "American", "real estate use") - DO NOT convert to yes/no
-- Example: Subquery "Is X from Y?" with evidence "X is from Y" → Answer: "Yes"
-- Example: Subquery "What is X's nationality?" with evidence "X is American" → Answer: "American" (NOT "Yes", even if original question is yes/no format)
-- Example: Subquery "Find the primary use of X" with evidence "X is used for real estate" → Answer: "real estate use" (factual extraction)
+            prompt_lines.append("Return only the JSON object.")
+            prompt = "\n".join(prompt_lines)
 
-**CRITICAL: Entity Extraction Priority**
-- If the subquery asks for an ENTITY NAME (e.g., "What is the name of...", "Who founded...", "What company..."), and the entity name appears in the evidence, extract the entity name
-- Do NOT return "unknown" just because related information (e.g., founder, date) is not found - if the entity itself is in the evidence, extract it
-- Example: Subquery "What is the distribution company for film X?" Evidence mentions "YG Entertainment" but doesn't mention founder → Answer: "YG Entertainment" (NOT "unknown")
-- Example: Subquery "Who founded YG Entertainment?" Evidence mentions "YG Entertainment" but doesn't mention founder → Answer: "unknown" (founder not found, which is what was asked)
-- Only return "unknown" if the SPECIFIC information asked for is not in the evidence
-
-**✅ CRITICAL: Hierarchical Level Awareness (Entropy-Aware Compression)**
-- If a hierarchical level constraint is specified above (e.g., "state_province" level required), you MUST extract the entity at that level
-- This is entropy-aware compression: min H(final answer; evidence) while respecting the initial condition constraint
-- If evidence contains entities at DIFFERENT hierarchical levels, extract the entity at the REQUIRED level (not a different level)
-- **IMPORTANT**: If evidence only contains entities at the WRONG hierarchical level (e.g., municipality when state is required), 
-  you may return "unknown" for THIS step, but the system will continue searching in other documents
-- **However**: If evidence contains BOTH wrong-level and correct-level entities, extract the correct-level entity
-- Examples (Generic Patterns):
-  * If higher level is required and evidence says "Lower-Level Entity, Higher-Level Entity" → Extract "Higher-Level Entity" (required level)
-  * If higher level is required and evidence says "X is located in Y [higher-level term]" → Extract "Y" (higher level)
-  * If lower level is required and evidence says "Lower-Level Entity, Higher-Level Entity" → Extract "Lower-Level Entity" (required level)
-  * For territorial hierarchies: If state/province level required and evidence says "City Municipality, State Name" → Extract "State Name"
-  * For organizational hierarchies: If company level required and evidence says "Department Name, Company Name" → Extract "Company Name"
-  * For taxonomic hierarchies: If genus level required and evidence says "Species Name (Genus Name)" → Extract "Genus Name"
-- This ensures compression respects the global boundary condition as well as the initial condition (u(x,0)) set by GranularityRegulator
-- DO NOT extract entities at wrong hierarchical levels - this violates the constraint and increases entropy
-
-### ====================================================================
-### ENTROPY-AWARE COMPRESSION INSTRUCTIONS
-### ====================================================================
-**You are collapsing probability mass P(x,t) into anchors for the next hop.**
-
-Compression Level: {compression_level.upper()}
-Strategy: {compression_strategy}
-
-**Key Principle**: You are NOT just extracting an answer. You are:
-1. Collapsing the probability distribution P(x,t) over possible answers
-2. Selecting the answer that is most consistent with active anchors
-3. Creating new anchors for the next hop in the diffusion process
-
-**Compression Strategy Based on Entropy:**
-- **HIGH COMPRESSION** (Entropy={entropy:.3f} < 0.3, Confidence={confidence:.3f} > 0.7):
-  → Collapse probability mass to the MOST anchor-consistent answer
-  → High precision, low exploration
-  → If multiple answers exist, choose the one that best aligns with anchors
-  → Focus on precision over breadth
-
-- **MEDIUM COMPRESSION** (Entropy={entropy:.3f} < 0.5):
-  → Balance anchor consistency with evidence exploration
-  → Consider multiple answers but prioritize anchor-aligned ones
-  → Moderate precision and exploration
-
-- **LOW COMPRESSION** (Entropy={entropy:.3f} >= 0.5):
-  → Explore evidence more broadly
-  → Still maintain anchor consistency, but allow more exploration
-  → Lower precision, higher exploration
-
-**Anchor Consistency Priority:**
-- If the answer contains entities from active anchors → HIGH priority
-- If the answer aligns with regulator constraints → HIGH priority
-- If multiple valid answers exist → Choose the most anchor-consistent one
-- Your output becomes a NEW ANCHOR for the next hop
-
-Extract the final answer as a short phrase copied EXACTLY from the evidence.
-- Do NOT explain your answer
-- Do NOT paraphrase
-- Do NOT modify wording
-- Do NOT infer anything not explicitly in the evidence
-- If evidence was provided by the Extractor Agent, extract the answer from it - the Extractor already handled contextual matching
-- ONLY return "unknown" if the SPECIFIC information asked for is not present in the evidence
-- If the entity name is in evidence but related attributes aren't, extract the entity name (don't return "unknown" for entity questions)
-- If evidence exists, extract the most relevant answer following the Answer Format Rules
-- **PRIORITIZE anchor-consistent answers when multiple valid answers exist**
-
-Your response MUST be a valid JSON object with this exact structure:
-{{
-    "question": "The original subquery",
-    "answer": "Extracted answer - copy exactly from evidence (typically 1-5 words, 'Yes' or 'No' only if subquery is yes/no format)",
-    "confidence": 0.0-1.0,
-    "sources": ["doc1_id", "doc2_id"],
-    "supporting_evidence": [
-        {{
-            "text": "Relevant passage from context",
-            "source": "source_document_id",
-            "relevance": 0.9
-        }}
-    ]
-}}
-
-### CRITICAL: Answer Format Rules (READ FIRST):
-
-**0. Yes/No Questions (Check SUB-QUERY Format Only)**
-   - **Detection**: Check ONLY the subquery format (ignore original question format for intermediate steps)
-   - Subqueries starting with "Is", "Are", "Was", "Were", "Do", "Does", "Did", "Can", "Could", "Would", "Should", "Has", "Have", "Had"
-   - **Rule**: Answer with ONLY "Yes" or "No" - nothing else
-   - **Conversion Logic**: 
-     * If subquery asks "Is X [attribute]?" and evidence confirms X is [attribute] → "Yes"
-     * If subquery asks "Is X [attribute]?" and evidence shows X is NOT [attribute] → "No"
-     * Example: Subquery "Is X from Y?" Evidence: "X is from Y" → Answer: "Yes"
-     * Example: Subquery "Was X born in Y?" Evidence: "X was born in Z" → Answer: "No"
-   - **IMPORTANT**: If subquery is factual (e.g., "What is X's nationality?"), extract the fact (e.g., "American") - do NOT convert to yes/no
-
-**1. Entity Names (e.g., "What is the name of...", "Who created...", "What company...", "What organization...")**
-   - Rule: Extract ONLY the entity name - nothing else
-   - **CRITICAL**: If the question asks for an entity name and the entity appears in evidence, extract it even if related information (founder, date, etc.) is not found
-   - ❌ WRONG: "[group name] formed by [entity]" (includes extra context)
-   - ✅ CORRECT: "[entity name]" (just the entity)
-   - Example: Question "What is the distribution company for film X?" Evidence: "Film X was distributed by YG Entertainment" → Answer: "YG Entertainment" (even if founder info isn't in evidence)
-   - Example: Question "formed by who?" → Answer: "[Person Name]" (not "[Organization Name] formed by [Person Name]")
-   - Example: Question "What company formed Winner?" Evidence mentions "YG Entertainment" and "Winner" but doesn't mention founder → Answer: "YG Entertainment" (entity is in evidence)
-
-**2. Numerical Questions (e.g., "how many people?", "how many cars?", "what capacity?")**
-   - Rule: Extract ONLY the number and unit (if specified) - nothing else
-   - ❌ WRONG: "[venue name] [number] people" (includes venue name)
-   - ❌ WRONG: "[number] people" when ground truth is "[number] seated" (wrong unit)
-   - ✅ CORRECT: "[number]" or "[number] [unit]" (just the number and correct unit from evidence)
-   - Example: Question "can serve how many guests?" → Answer: "[number] guests" (not "[venue name] [number] people")
-   - If evidence specifies a unit (e.g., "seated", "people", "cars"), use that exact unit
-
-**3. Location Questions (e.g., "in what [city]?", "located in what [city]?", "based in what [location]?")**
-   - Rule: Extract the FULL location information that directly answers the question
-   - **CRITICAL**: Preserve the complete location string from evidence - do NOT truncate or simplify
-   - If evidence contains "[Neighborhood], [City]" (e.g., "Greenwich Village, New York City"), extract the FULL string "[Neighborhood], [City]"
-   - If evidence contains "[City], [State/Country]" (e.g., "New York City, New York"), extract the FULL string
-   - If the question specifically asks for just a city name and evidence has "[Neighborhood], [City]", you may extract just "[City]" - but ONLY if the question explicitly asks for "city" only
-   - If the question asks for "location", "base", "where", or similar general terms, extract the FULL location string from evidence
-   - ❌ WRONG: Evidence "Greenwich Village, New York City" → Answer "New York City" (truncated, missing neighborhood)
-   - ✅ CORRECT: Evidence "Greenwich Village, New York City" → Answer "Greenwich Village, New York City" (full location)
-   - ❌ WRONG: Adding location details not present in evidence
-   - ✅ CORRECT: Extract exactly what appears in evidence, preserving full location strings
-
-**4. Specific Positions/Titles (e.g., "What position did X hold?", "What was X's role?")**
-   - Rule: Extract ONLY ONE position - the most significant/relevant one if multiple exist
-   - ❌ WRONG: "[position1] and [position2] and [position3]" (listing multiple)
-   - ❌ WRONG: "[position] of [country/organization]" (adding irrelevant organizational context like "[Position Title] of [Country]" → should be "[Position Title]")
-   - ✅ CORRECT: "[position name]" (ONE position - extract the FULL position title if it's multi-word)
-   - ✅ CORRECT: "[Position Title]" (preserve full multi-word titles - connecting words like "of", "the" are part of the title)
-   - ❌ WRONG: "[Truncated Title]" (truncated - missing part of the position name)
-   - Rule: If the question asks for "a position" or "the position" (singular) but evidence shows multiple positions:
-     * Extract ONLY ONE position based on the evidence, prioritizing in this order:
-       1. **Most directly relevant to question context** (if question mentions specific time period, event, or achievement, choose the position related to that)
-       2. **Most emphasized in evidence** (repeatedly mentioned, highlighted, most detailed description)
-       3. **Highest-ranking or most prominent** (if positions are equally emphasized, choose the most senior/significant role)
-     * DO NOT prioritize based solely on duration unless the question specifically asks about duration
-     * DO NOT list multiple positions - extract ONLY the position name itself
-     * PRESERVE full multi-word position titles (e.g., "[Position Title] with connecting words")
-     * REMOVE only extra organizational/country context (e.g., "[Position Title] of [Country]" → "[Position Title]") 
-
-**5. Nationalities/Attributes (e.g., "What nationality was X?", "What is the use of X?")**
-   - Rule: Extract ONLY the attribute asked for
-   - ❌ WRONG: "[person] was [nationality]" (includes person name)
-   - ✅ CORRECT: "[nationality]" or "[attribute value]" (just the attribute)
-   - Example: Subquery "What is the primary use of X?" Evidence: "X is used for real estate" → Answer: "real estate use" (factual extraction)
-
-**7. Time Period Questions (e.g., "during what years?", "served during what timeframe?")**
-   - Rule: Extract the time period exactly as it appears in the evidence
-   - Preserve the format from evidence (e.g., "1990-2000", "from 1990 to 2000", "1990 until 2000")
-   - ✅ CORRECT: Use the exact format from evidence, including any connecting words if present
-   - ❌ WRONG: Changing the format or adding connectors not present in evidence
-
-### Guidelines:
-1. **BE CONCISE**: Answer the subquery directly - typically 1-5 words, rarely more than 1 sentence
-2. **BE SPECIFIC**: Extract ONLY the exact answer requested - nothing else
-3. **RESPECT HIERARCHICAL LEVEL**: If a hierarchical level constraint is specified above, extract the entity at that level (not a different level) - this is entropy-aware compression respecting the initial condition
-4. **DO NOT** include descriptions, explanations, or multiple facts
-4. **DO NOT** list multiple positions/entities - extract ONLY the one asked for
-5. **DO NOT** include venue names, organization names, or other context unless the question specifically asks for it
-6. If the question asks for one thing, provide ONLY that thing
-7. Rate your confidence honestly based on evidence quality
-8. **CRITICAL**: For intermediate steps, extract factual answers. The Final Assembler will handle yes/no reasoning for the original question.
-
-**HANDLING AMBIGUOUS QUESTIONS**: If the question asks for one thing but evidence contains multiple valid answers:
-   - Choose the answer that is most prominently featured in the evidence, prioritizing in this order:
-     * **Most directly relevant** (directly answers the question's specific context or intent)
-     * **Most emphasized** (repeatedly mentioned, highlighted, most detailed description)
-     * **Most detailed** (has more description, context, or information in the evidence)
-     * **Mentioned first or most prominently** (appears early or is emphasized in the evidence)
-   - DO NOT prioritize based solely on duration or time period unless the question specifically asks about duration
-   - Choose the one most directly relevant to the question's context and intent
-   - Base your decision on the evidence provided, not on assumptions about what the "correct" answer might be
-   - Extract ONE answer, not multiple
-"""
-            
             # Log the QA request
             logger.info(f"Generating step-specific answer for subquery: {question[:100]}...")
             logger.debug(f"Using {len(context)} context items, min_confidence={min_confidence}")
@@ -745,7 +386,8 @@ Your response MUST be a valid JSON object with this exact structure:
                     confidence=min(1.0, max(0.0, float(result.get("confidence", 0.0)))),
                     reasoning=result.get("reasoning", ""),
                     sources=list(set(result.get("sources", []))),  # Remove duplicates
-                    supporting_evidence=supporting_evidence
+                    supporting_evidence=supporting_evidence,
+                    evidence_term=result.get("evidence_term")  # Capture from LLM if provided
                 )
                 
                 # Filter out evidence without sources
@@ -757,28 +399,9 @@ Your response MUST be a valid JSON object with this exact structure:
                 # Update sources list based on actual evidence
                 answer.sources = list(set(e.source for e in answer.supporting_evidence))
                 
-                # ✅ FIRST PRINCIPLES FIX: Hierarchical Inference
-                # If answer is "unknown" due to hierarchical level mismatch, attempt inference
-                answer_lower = answer.answer.lower().strip()
-                if answer_lower == "unknown" and required_domain and required_hierarchical_level:
-                    inferred_entity = self._attempt_hierarchical_inference(
-                        question=question,
-                        context=context,
-                        required_domain=required_domain,
-                        required_level=required_hierarchical_level
-                    )
-                    
-                    if inferred_entity:
-                        logger.info(
-                            f"QA Agent: Hierarchical inference successful - inferred '{inferred_entity}' "
-                            f"from lower-level evidence (required: {required_domain}/{required_hierarchical_level})"
-                        )
-                        answer.answer = inferred_entity
-                        answer.confidence = min(0.8, answer.confidence + 0.2)  # Boost confidence slightly
-                        answer.reasoning = (
-                            f"Inferred {required_hierarchical_level} entity '{inferred_entity}' "
-                            f"from hierarchical context. " + (answer.reasoning or "")
-                        )
+                # ✅ REMOVED: Dangerous rewriting of "unknown" to extracted entity
+                # This breaks separation of concerns: QA compresses, Manager tracks, Gate commits
+                # Evidence extraction now happens via slot_candidates (Fix 1)
                 
                 # If confidence is below threshold, update the answer
                 if answer.confidence < min_confidence:
@@ -796,9 +419,10 @@ Your response MUST be a valid JSON object with this exact structure:
                 # ====================================================================
                 # The answer is a collapsed probability mass - extract entities as new anchors
                 # These anchors will stabilize the next hop in the diffusion process
+                # ✅ FIX 2: Do NOT generate anchors from "unknown" (abstention, not entity)
                 new_anchors = []
                 answer_text = answer.answer
-                if answer_text:
+                if answer_text and answer_text.lower().strip() != "unknown":
                     import re
                     # Extract potential entity names from answer (capitalized words/phrases)
                     capitalized_entities = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', answer_text)
@@ -865,6 +489,85 @@ Your response MUST be a valid JSON object with this exact structure:
                     "new_anchors": new_anchors,
                     "anchor_consistency": anchor_consistency
                 }
+                
+                # ✅ INFER SLOT AND EMIT SLOT-LABELED CANDIDATES
+                # Emit candidates from evidence even if answer = "unknown" (preserves diffusion)
+                slot = self._infer_slot(question, step_context)
+                
+                # Build evidence candidates (tentative hypotheses from evidence)
+                evidence_candidates = []
+                import re
+                for ev in answer.supporting_evidence:
+                    # Extract entity-like spans from evidence text
+                    matches = re.findall(
+                        r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b",
+                        ev.text
+                    )
+                    for m in matches:
+                        # Filter: minimum length and exclude common words
+                        if len(m) > 2 and m not in ["The", "A", "An", "This", "That", "Yes", "No"]:
+                            evidence_candidates.append({
+                                "answer": m,
+                                "slot": slot,
+                                "confidence": max(answer.confidence, 0.4),  # Tentative confidence
+                                "evidence_count": 1,
+                                "sources": [ev.source],
+                                "status": "tentative"  # Tentative, not committed
+                            })
+                
+                # Build final slot_candidates list
+                slot_candidates = []
+                
+                # If answer is not "unknown", emit the extracted candidate
+                if answer.answer.lower().strip() != "unknown":
+                    # ✅ FIX #1: Extract evidence_term DESCRIPTIVELY (don't normalize)
+                    evidence_term = None
+                    
+                    # Try to get from LLM response first (if it provided evidence_term)
+                    if answer.evidence_term:
+                        evidence_term = answer.evidence_term
+                    else:
+                        # Fallback: extract from supporting_evidence descriptively
+                        for ev in answer.supporting_evidence:
+                            ev_text_lower = ev.text.lower()
+                            # ✅ FIX #1: Keep descriptive, don't normalize
+                            if "partner" in ev_text_lower:
+                                evidence_term = "partner"
+                            elif "wife" in ev_text_lower:
+                                evidence_term = "wife"
+                            elif "husband" in ev_text_lower:
+                                evidence_term = "husband"
+                            elif "married" in ev_text_lower or "marriage" in ev_text_lower:
+                                evidence_term = "married"
+                            elif "spouse" in ev_text_lower:
+                                evidence_term = "spouse"
+                            # Add more role-specific terms as needed
+                            elif "founded" in ev_text_lower or "founder" in ev_text_lower:
+                                evidence_term = "founded"
+                            elif "performer" in ev_text_lower or "performed" in ev_text_lower:
+                                evidence_term = "performer"
+                            elif "headquartered" in ev_text_lower or "headquarters" in ev_text_lower:
+                                evidence_term = "headquarters"
+                            if evidence_term:
+                                break  # Use first match found
+                    
+                    slot_candidates.append({
+                        "answer": answer.answer,
+                        "slot": slot,
+                        "confidence": answer.confidence,
+                        "evidence_count": len(answer.supporting_evidence),
+                        "sources": answer.sources,
+                        "status": "extracted",  # ✅ FIX #2: Extracted, not committed
+                        "evidence_term": evidence_term  # What evidence actually said
+                    })
+                
+                # Always add evidence candidates (tentative hypotheses)
+                slot_candidates.extend(evidence_candidates)
+                
+                metadata["slot_candidates"] = slot_candidates
+                
+                # ✅ FIX 4: Explicitly mark abstention in metadata
+                metadata["abstained"] = (answer.answer.lower().strip() == "unknown")
                 
                 return AgentResponse(
                     content=json.dumps(answer_dict),  # Include diffusion_metadata

@@ -67,13 +67,33 @@ class FinalAssembler:
             Dictionary with final assembled answer and metadata
         """
         logger.info("Starting final answer assembly...")
+
+        # Extract inputs up front (safe defaults ensure names are defined)
+        main_query = assembler_input.get("main_query", "")
+        disambiguated_query = assembler_input.get("disambiguated_query", main_query)
+        query_type = assembler_input.get("query_type", "unknown")
+        step_results = assembler_input.get("step_results", []) or []
+        protected_ctx = assembler_input.get("protected_anchors") or {}
+        norm = lambda s: re.sub(r"\s+", " ", s.strip().lower()) if s else ""
+        plan = assembler_input.get("plan", {})
+        execution_state = assembler_input.get("execution_state")
+        if execution_state is None:
+            class _DummyState:
+                protected_answers = {}
+            execution_state = _DummyState()
+        from typing import Dict
+        # Extract protected_answer_manager if provided
+        protected_answer_manager = assembler_input.get("protected_answer_manager")
         
+        # Get protected_answers from manager only (no fallback to legacy execution_state)
+        protected_answers: Dict[str, Any] = {}
+        if protected_answer_manager:
+            protected_answers = protected_answer_manager.get_protected_answers()
+        else:
+            # Fallback to assembler_input if manager not provided (shouldn't happen in normal flow)
+            protected_answers = assembler_input.get("protected_answers", {})
+
         try:
-            main_query = assembler_input.get("main_query", "")
-            disambiguated_query = assembler_input.get("disambiguated_query", main_query)
-            query_type = assembler_input.get("query_type", "unknown")
-            step_results = assembler_input.get("step_results", [])
-            plan = assembler_input.get("plan", {})
             
             # Process step results
             processed_steps = await self._process_step_results(step_results)
@@ -299,7 +319,9 @@ class FinalAssembler:
         main_query: str,
         processed_steps: List[Dict[str, Any]],
         query_type: str,
-        reasoning_summary: str
+        reasoning_summary: str,
+        protected_ctx: Optional[Dict[str, Any]] = None,
+        step_results: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """
         Synthesize the final answer from all step results.
@@ -348,7 +370,9 @@ class FinalAssembler:
                 final_answer = await self._synthesize_comparative_answer(main_query, step_answers)
             elif query_type == "multi-hop":
                 # Pass processed_steps for convergence estimation (entropy trajectory, anchors)
-                final_answer = await self._synthesize_multihop_answer(main_query, step_answers, processed_steps)
+                final_answer = await self._synthesize_multihop_answer(
+                    main_query, step_answers, processed_steps, protected_ctx=protected_ctx, step_results=step_results
+                )
             elif query_type == "analytical":
                 final_answer = await self._synthesize_analytical_answer(main_query, step_answers)
             else:
@@ -385,7 +409,10 @@ class FinalAssembler:
         self, 
         query: str, 
         step_answers: List[Dict[str, Any]], 
-        processed_steps: List[Dict[str, Any]] = None
+        processed_steps: List[Dict[str, Any]] = None,
+        protected_ctx: Optional[Dict[str, Any]] = None,
+        step_results: Optional[List[Dict[str, Any]]] = None,
+        protected_answer_manager: Optional[Any] = None,
     ) -> str:
         """
         Synthesize answer for multi-hop questions using convergence estimation.
@@ -464,6 +491,14 @@ class FinalAssembler:
         # Calculate P_final for each candidate using convergence formula:
         # P_final = P_raw + α·anchor_consistency - β·drift + γ·evidence_density
         answer_candidates = []
+        # Precompute required granularity once (do not infer from candidates)
+        try:
+            from .regulators.granularity_regulator import GranularityRegulator
+            granularity_reg = GranularityRegulator()
+            required_domain, required_level = granularity_reg._infer_required_level(query)
+        except Exception:
+            granularity_reg = None
+            required_domain, required_level = (None, None)
         for i, step_answer in enumerate(step_answers):
             answer = step_answer.get("answer", "")
             confidence = step_answer.get("confidence", 0.5)
@@ -500,6 +535,17 @@ class FinalAssembler:
             # Clamp to [0, 1]
             p_final = max(0.0, min(1.0, p_final))
             
+            # Extract slot from QA metadata (slot_candidates) if available
+            slot = "default"
+            if processed_steps and i < len(processed_steps):
+                qa_result = processed_steps[i].get("qa_result", {})
+                slot_candidates = qa_result.get("slot_candidates", [])
+                if slot_candidates and len(slot_candidates) > 0:
+                    slot = slot_candidates[0].get("slot", "default")
+                else:
+                    # Fallback to step_id if no slot_candidates
+                    slot = processed_steps[i].get("step_id", "default")
+            
             answer_candidates.append({
                 "answer": answer,
                 "p_final": p_final,
@@ -508,11 +554,129 @@ class FinalAssembler:
                 "drift": diffusion,
                 "evidence_density": evidence_density,
                 "entropy": entropy,
-                "hop": i + 1
+                "hop": i + 1,  # hop index (later hop = more recent evidence)
+                "has_supporting_evidence": bool(sources),
+                "sources": sources,
+                "confidence": confidence,
+                "slot": slot,  # Semantic slot from QA metadata (e.g., "spouse", "performer")
             })
         
-        # Sort by P_final (highest first) - this is argmax(P_final)
-        answer_candidates.sort(key=lambda x: x["p_final"], reverse=True)
+        # Protected answers & granularity-aware boost/penalty
+        def _norm_answer(ans: str) -> str:
+            import re
+            return " ".join(re.sub(r"[^\w\s]", " ", (ans or "").lower()).split())
+
+        def is_valid_span(ans: str) -> bool:
+            """Layer-1 validity gate to filter junk/placeholder answers before scoring."""
+            if not ans:
+                return False
+            import re
+            norm = " ".join(re.sub(r"[^\w\s]", " ", str(ans).lower()).split())
+            if not norm:
+                return False
+            confirmations = {"yes", "no", "unknown", "none", "n/a", "na", ""}
+            if norm in confirmations:
+                return False
+            articles = {"the", "a", "an"}
+            tokens = norm.split()
+            if all(tok in articles for tok in tokens):
+                return False
+            if len(tokens) < 2 and len(norm) < 6:
+                return False
+            return True
+
+        def apply_protected_boost_and_level_penalty(candidates, protected_map, gran_regulator=None,
+                                                    required_domain=None, required_level=None):
+            confirmation_only = {"yes", "no", "unknown", "none", "n/a", "na", ""}
+            for cand in candidates:
+                slot = cand.get("slot") or "default"
+                pa = protected_map.get(slot)
+                cand_norm = _norm_answer(cand.get("answer", ""))
+                ev_count = len(cand.get("sources") or [])
+                boost = 0.0
+                protected_match = False
+
+                # Layer 1: validity gate before any scoring
+                if not is_valid_span(cand.get("answer", "")):
+                    cand["p_final"] = 0.0
+                    cand["confidence"] = 0.0
+                    cand["is_protected_match"] = False
+                    continue
+
+                # Drop/penalize unknown/confirmation answers
+                if cand_norm in confirmation_only:
+                    cand["p_final"] = 0.0
+                    cand["confidence"] = 0.0
+                    cand["is_protected_match"] = False
+                    continue
+
+                # Boost if matches protected answer
+                if pa and cand_norm == pa.get("normalized"):
+                    protected_match = True
+                    boost += 0.1  # boost slot-correct answers
+                    boost += min(0.01 * pa.get("evidence_count", pa.get("evidence", 0)), 0.03)
+
+                # Penalize zero evidence
+                if ev_count == 0:
+                    boost -= 0.02
+
+                # Penalize granularity violation using required_domain/level (not inferred from candidate)
+                if gran_regulator and (required_domain or required_level):
+                    try:
+                        dom, lvl, _ = gran_regulator.classify_entity_level(cand.get("answer", ""))
+                        if gran_regulator.is_level_violation(required_domain, required_level, dom, lvl):
+                            boost -= 0.03
+                    except Exception:
+                        pass
+
+                cand["p_final"] = min(1.0, max(0.0, cand.get("p_final", 0.0) + boost))
+                cand["is_protected_match"] = protected_match
+
+            # Tie-break: protected match, evidence count, confidence, hop recency, then p_final
+            candidates.sort(
+                key=lambda c: (
+                    c.get("is_protected_match", False),
+                    len(c.get("sources") or []),
+                    c.get("confidence", 0.0),
+                    c.get("hop", 0),
+                    c.get("p_final", 0.0),
+                ),
+                reverse=True,
+            )
+
+        # Get protected answers from manager (read-only) if available
+        _protected_answers_local = {}
+        target_slot = None
+        try:
+            # Use protected_answer_manager if passed
+            if protected_answer_manager:
+                _protected_answers_local = protected_answer_manager.get_protected_answers()  # read-only
+                target_slot = protected_answer_manager.target_slot  # Get target slot (read-only)
+            else:
+                # Fallback: try to get from function closure or default empty dict
+                _protected_answers_local = {}
+        except Exception:
+            _protected_answers_local = {}
+
+        # Apply deterministic boost for target slot match (enforces question semantics)
+        SLOT_PRIORITY_BOOST = 0.2  # Strong boost for semantic correctness
+        if target_slot:
+            for candidate in answer_candidates:
+                slot = candidate.get("slot")
+                if slot and slot == target_slot:
+                    candidate["p_final"] = min(1.0, candidate.get("p_final", 0.0) + SLOT_PRIORITY_BOOST)
+                    logger.debug(
+                        f"[Assembler] Boosted candidate '{candidate.get('answer', '')[:30]}...' "
+                        f"(slot='{slot}' matches target_slot='{target_slot}', p_final={candidate.get('p_final', 0.0):.3f})"
+                    )
+
+        apply_protected_boost_and_level_penalty(
+            answer_candidates,
+            _protected_answers_local,
+            gran_regulator=granularity_reg,
+            required_domain=required_domain,
+            required_level=required_level,
+        )
         
         # ✅ CONCISE: Only log top 3 candidates with essential info
         logger.debug(f"Convergence ranking (top 3 by P_final):")
@@ -529,9 +693,7 @@ class FinalAssembler:
         # ====================================================================
         # Generalized hierarchical level correction using GranularityRegulator
         # instead of hardcoded location terms. Works for any hierarchical domain.
-        from .regulators.granularity_regulator import GranularityRegulator
-        granularity_reg = GranularityRegulator()
-        required_domain, required_level = granularity_reg._infer_required_level(query)
+        # required_domain/level already computed above (granularity_reg may be None)
         
         # Get best candidate based on P_final (convergence estimation)
         best_candidate = answer_candidates[0] if answer_candidates else None

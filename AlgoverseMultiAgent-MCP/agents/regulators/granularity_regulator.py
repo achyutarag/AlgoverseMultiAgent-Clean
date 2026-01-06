@@ -406,6 +406,11 @@ class GranularityRegulator(BaseRegulator):
             best_domain = list(domain_scores.keys())[0]
         
         best_level = domain_scores[best_domain]["level"]
+
+        # Guard: if question clearly mentions a city/municipality, avoid forcing state/province
+        if best_domain == "territorial" and best_level == "state_province":
+            if "city" in question_lower or "ciudad" in question_lower:
+                best_level = "municipality"
         
         result = (best_domain, best_level)
         
@@ -516,6 +521,14 @@ class GranularityRegulator(BaseRegulator):
         # Violation: entity is at a different level than required
         # (We allow same level or parent level, but not child level)
         return entity_level_num != required_level_num
+
+    # Public helper to avoid reaching into private methods externally
+    @staticmethod
+    def infer_required(plan_goal: Optional[str], query: Optional[str]) -> Tuple[Optional[str], Optional[str], List[str]]:
+        reg = GranularityRegulator()
+        domain, level = reg._infer_required_level(plan_goal or query or "")
+        keywords = reg._get_level_keywords(domain, level) if domain and level else []
+        return domain, level, keywords
     
     def extract_parent_level_name(self, 
                                   entity_text: str,

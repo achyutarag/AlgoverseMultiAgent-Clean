@@ -23,8 +23,8 @@ import re
 import numpy as np
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional
-from collections import defaultdict
+from typing import Dict, Any, List, Optional, Tuple
+from collections import defaultdict, Counter
 
 # Add project to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -42,6 +42,54 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+# ABLATED / EXPERIMENTAL seatbelt: optional stabilizer for oscillation failures
+ABLATE_STABILIZER = os.getenv("ABLATE_STABILIZER", "0") == "1"
+ABLATE_ENTROPY_GUARD = os.getenv("ABLATE_ENTROPY_GUARD", "0") == "1"
+# Temporary: make guard threshold configurable to verify firing
+ENTROPY_GUARD_THRESHOLD = float(os.getenv("ENTROPY_GUARD_THRESHOLD", "0.1"))
+
+logger.info(
+    f"ABLATE_ENTROPY_GUARD={ABLATE_ENTROPY_GUARD}, "
+    f"ENTROPY_GUARD_THRESHOLD={ENTROPY_GUARD_THRESHOLD}, "
+    f"ABLATE_STABILIZER={ABLATE_STABILIZER}"
+)
+ENTITY_CONTEXT_TOKENS = {
+    "founder",
+    "owner",
+    "company",
+    "manufacturer",
+    "distributor",
+    "organization",
+    "corporation",
+    "subsidiary",
+    "parent",
+    "headquarters",
+    "employer",
+    "location",
+    "city",
+    "country",
+    "province",
+    "state",
+    "agency",
+    "entity",
+    "brand",
+    "product",
+}
+PROCEDURAL_TOKENS = {
+    "step",
+    "identify",
+    "extract",
+    "results",
+    "previous",
+    "from",
+    "answer",
+    "obtain",
+    "question",
+    "intermediate",
+    "plan",
+    "instruction",
+}
 
 
 def _qtokens(s: str) -> List[str]:
@@ -124,6 +172,136 @@ def compute_query_oscillation_metrics(
             "token_flip_rate": (len(prev_added) + len(prev_removed)) / max(1, len(prevt)),
         },
     }
+
+
+def _experimental_stabilizer_reinject_entities(
+    prev_stabilized: str,
+    curr_stabilized: str,
+    velocity: dict,
+) -> Tuple[str, Dict[str, Any]]:
+    """
+    ABLATED / EXPERIMENTAL seatbelt.
+    Returns (next_prev_query, stabilizer_meta). Does NOT alter current hop.
+    Triggers only on oscillation failure signature.
+    """
+    meta: Dict[str, Any] = {
+        "stabilizer_triggered": False,
+        "stabilizer_reason": None,
+        "stabilizer_action": None,
+    }
+    if not ABLATE_STABILIZER:
+        return curr_stabilized, meta
+    if not isinstance(velocity, dict):
+        return curr_stabilized, meta
+
+    if not (
+        velocity.get("oscillation_alert") is True
+        and (velocity.get("direction_cosine") or 0) < 0
+        and velocity.get("has_token_churn") is True
+    ):
+        return curr_stabilized, meta
+
+    tokens_added = [t.lower() for t in velocity.get("oscillation_tokens_added", []) or []]
+    tokens_removed = [t.lower() for t in velocity.get("oscillation_tokens_removed", []) or []]
+
+    # Require at least one entity/context token removed and one procedural token added
+    removed_entities = [t for t in tokens_removed if t in ENTITY_CONTEXT_TOKENS]
+    added_procedural = [t for t in tokens_added if t in PROCEDURAL_TOKENS]
+    if not removed_entities or not added_procedural:
+        return curr_stabilized, meta
+
+    # Option A: reinject removed entity/context tokens as a bracketed suffix (order-insensitive)
+    missing = [t for t in removed_entities if t not in curr_stabilized.lower()]
+    reinjected = curr_stabilized
+    if missing:
+        reinjected = f"{curr_stabilized} [reinject: {' '.join(missing)}]"
+
+    meta.update({
+        "stabilizer_triggered": True,
+        "stabilizer_reason": "entity_drop_with_oscillation",
+        "stabilizer_action": "reinject_entity_tokens",
+        "stabilizer_reinjected_tokens": missing,
+    })
+    return reinjected, meta
+
+
+def _apply_entropy_guard(
+    hop_idx: int,
+    entropy_val: float,
+    velocity_dm: Dict[str, Any],
+    retrieval_params: Dict[str, Any],
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    ABLATED / EXPERIMENTAL: early-hop entropy maturity guard.
+    Returns (maybe_modified_retrieval_params, guard_meta). Current hop only.
+    """
+    logger.info(f"[EntropyGuard] enter: hop={hop_idx}, entropy={entropy_val}")
+    meta: Dict[str, Any] = {
+        "entropy_guard_triggered": False,
+        "entropy_guard_reason": None,
+        "entropy_value": entropy_val,
+        "hop_index": hop_idx,
+        "k_before": retrieval_params.get("k"),
+        "k_after": retrieval_params.get("k"),
+        "min_sim_before": retrieval_params.get("min_similarity"),
+        "min_sim_after": retrieval_params.get("min_similarity"),
+        "skip_reason": None,
+    }
+    # Probe: record that guard was reached, even if it exits early
+    meta["guard_invoked"] = True
+
+    # Honor ablation flag (OFF means skip)
+    if ABLATE_ENTROPY_GUARD:
+        meta["skip_reason"] = "flag_off"
+        logger.info(f"[entropy_guard] skip: {meta['skip_reason']}, hop={hop_idx}, entropy={entropy_val}")
+        return retrieval_params, meta
+
+    # Conditions: only hop 1 may widen; later hops refine and do not widen on entropy
+    if hop_idx != 1:
+        meta["skip_reason"] = "late_hop"
+        logger.info(f"[entropy_guard] skip: {meta['skip_reason']}, hop={hop_idx}, entropy={entropy_val}")
+        return retrieval_params, meta
+    if entropy_val is None or entropy_val >= ENTROPY_GUARD_THRESHOLD:
+        meta["skip_reason"] = "entropy_above_threshold"
+        logger.info(f"[entropy_guard] skip: {meta['skip_reason']}, hop={hop_idx}, entropy={entropy_val}")
+        return retrieval_params, meta
+    # If velocity already exists, let velocity logic handle it (guard backs off)
+    if velocity_dm and velocity_dm.get("has_velocity_signal") is True:
+        meta["skip_reason"] = "velocity_present"
+        logger.info(f"[entropy_guard] skip: {meta['skip_reason']}, hop={hop_idx}, entropy={entropy_val}")
+        return retrieval_params, meta
+
+    # Probe: one-run visibility into what the guard sees
+    logger.info(
+        f"[EntropyGuardCheck] hop={hop_idx}, entropy={entropy_val}, "
+        f"vel_dir={velocity_dm.get('direction_cosine') if velocity_dm else None}"
+    )
+
+    # Optional: one-time wiring sanity check (remove after verification)
+    if hop_idx == 1:
+        logger.info("[EntropyGuard] FORCE TEST PATH HIT")
+
+    # Gentle recall bump (current hop only)
+    rp = dict(retrieval_params)
+    k_before = int(rp.get("k") or 0)
+    min_sim_before = float(rp.get("min_similarity") or 0.0)
+
+    k_max = 30
+    k_after = min(max(k_before * 2, k_before or 10), k_max)
+    min_sim_floor = 0.05
+    min_sim_after = max(min_sim_before - 0.03, min_sim_floor)
+
+    rp["k"] = k_after
+    rp["min_similarity"] = min_sim_after
+
+    meta.update({
+        "entropy_guard_triggered": True,
+        "entropy_guard_reason": "early_entropy_collapse",
+        "k_after": k_after,
+        "min_sim_after": min_sim_after,
+        "skip_reason": None,
+    })
+    return rp, meta
 
 
 def _embed_query_for_velocity(retriever, text: str) -> Optional[np.ndarray]:
@@ -289,7 +467,7 @@ class DiffusionDebugger:
                 'answer': qa_answer,
                 'confidence': qa_confidence
             },
-            'convergence': convergence_check
+            'convergence': convergence_check  # Observation only; entropy must not decide stop/commit
         }
         
         self.current_trace.add_hop(hop_data)
@@ -304,6 +482,7 @@ class DiffusionDebugger:
                 reason = anchor.get('reason', 'unknown')
                 self.stats['anchor_rejections'][reason] += 1
         
+        # Note: convergence checks are observation-only; do not use entropy to stop/commit
         if convergence_check:
             self.stats['convergence_checks'].append(convergence_check)
     
@@ -363,7 +542,7 @@ class DiffusionDebugger:
     
     def generate_debug_report(self) -> Dict[str, Any]:
         """Generate comprehensive debug report."""
-        return {
+        report = {
             'summary': {
                 'total_questions': len(self.traces),
                 'avg_em': sum(t.em for t in self.traces) / len(self.traces) if self.traces else 0.0,
@@ -380,6 +559,68 @@ class DiffusionDebugger:
             'failure_modes': self._identify_failure_modes(),
             'traces': [t.to_dict() for t in self.traces]
         }
+        # Diagnostic bucketing: oscillation / entropy / short-horizon
+        ENTROPY_LOW = 0.05
+        LOW_ENT_FRACTION = 0.8  # 80%
+        buckets = {
+            "oscillating": [],
+            "stable_low_entropy": [],
+            "stable_high_entropy": [],
+            "short_horizon": [],
+        }
+        for t in self.traces:
+            hops = t.hops
+            question = t.question
+            f1 = t.f1
+            em = t.em
+            if len(hops) < 3:
+                buckets["short_horizon"].append({"question": question, "f1": f1, "em": em})
+                continue
+
+            has_osc = False
+            low_ent_count = 0
+            for h in hops:
+                dm = h.get("debug_metadata", {}) if isinstance(h, dict) else {}
+                vel = dm.get("velocity", {}) if isinstance(dm, dict) else {}
+                if vel.get("oscillating") or vel.get("oscillation_alert"):
+                    has_osc = True
+                ent = h.get("flow_state", {}).get("entropy", 0.0)
+                if ent <= ENTROPY_LOW:
+                    low_ent_count += 1
+
+            low_ent_frac = low_ent_count / len(hops) if hops else 0.0
+
+            if has_osc:
+                buckets["oscillating"].append({"question": question, "f1": f1, "em": em})
+            elif low_ent_frac >= LOW_ENT_FRACTION:
+                buckets["stable_low_entropy"].append({"question": question, "f1": f1, "em": em})
+            else:
+                buckets["stable_high_entropy"].append({"question": question, "f1": f1, "em": em})
+
+        report["diagnostics"] = {
+            "buckets": buckets,
+            "bucket_sizes": {k: len(v) for k, v in buckets.items()}
+        }
+        # Summarize entropy_guard usage across all hops
+        guard_counts = {
+            "triggered": 0,
+            "skipped": 0,
+            "skip_reasons": Counter(),
+        }
+        for t in self.traces:
+            for h in t.hops:
+                eg = (h.get("debug_metadata") or {}).get("entropy_guard") if isinstance(h, dict) else None
+                if not eg:
+                    continue
+                if eg.get("entropy_guard_triggered"):
+                    guard_counts["triggered"] += 1
+                else:
+                    guard_counts["skipped"] += 1
+                    sr = eg.get("skip_reason") or "unknown"
+                    guard_counts["skip_reasons"][sr] += 1
+        guard_counts["skip_reasons"] = dict(guard_counts["skip_reasons"])
+        report["diagnostics"]["entropy_guard_summary"] = guard_counts
+        return report
     
     def _identify_failure_modes(self) -> Dict[str, Any]:
         """Identify common failure modes from traces."""
@@ -623,6 +864,8 @@ def patch_retriever_for_debugging(retriever):
     
     async def debug_process(input_data):
         """Wrapped process that captures retrieval parameters."""
+        # One-time visibility to confirm patched retriever is used
+        logger.info("[RetrievalDebug] debug_process wrapper called")
         # Extract retrieval parameters
         query = input_data.get("query", "")
         k = input_data.get("k", retriever.top_k)
@@ -633,13 +876,45 @@ def patch_retriever_for_debugging(retriever):
         # Calculate total uncertainty
         total_uncertainty = entropy_penalty + diffusion_penalty
         
-        _capture_state['retrieval_params'] = {
+        # Apply entropy guard (current hop only; does not change queries or entropy)
+        try:
+            fs = _capture_state.get("flow_snapshot", {}) or {}
+            entropy_val = float(fs.get("entropy", 0.0))
+        except Exception:
+            entropy_val = 0.0
+        velocity_dm = (_capture_state.get("debug_metadata", {}) or {}).get("velocity", {})
+
+        retrieval_params = {
             'k': k,
             'min_similarity': min_sim,
             'total_uncertainty': total_uncertainty,
             'entropy_penalty': entropy_penalty,
             'diffusion_penalty': diffusion_penalty
         }
+
+        retrieval_params, guard_meta = _apply_entropy_guard(
+            hop_idx=_capture_state.get("current_hop", 0),
+            entropy_val=entropy_val,
+            velocity_dm=velocity_dm if isinstance(velocity_dm, dict) else {},
+            retrieval_params=retrieval_params,
+        )
+
+        # Propagate any widened params into the retriever input
+        input_data["k"] = retrieval_params.get("k", k)
+        input_data["min_similarity"] = retrieval_params.get("min_similarity", min_sim)
+
+        _capture_state['retrieval_params'] = retrieval_params
+
+        # Record guard metadata
+        dm_guard = _capture_state.get("debug_metadata", {})
+        if not isinstance(dm_guard, dict):
+            dm_guard = {}
+        dm_guard["entropy_guard"] = guard_meta
+        _capture_state["debug_metadata"] = dm_guard
+        # Also stash a copy in retrieval_params so it can be recovered if debug_metadata is overwritten later
+        rp_copy = _capture_state.get("retrieval_params", {}) or {}
+        rp_copy["entropy_guard_meta"] = guard_meta
+        _capture_state["retrieval_params"] = rp_copy
         
         # Call original
         result = await original_process(input_data)
@@ -741,6 +1016,83 @@ def patch_orchestrator_for_debugging(orchestrator):
         qa_answer = qa_result.get("answer", "") if isinstance(qa_result, dict) else ""
         qa_confidence = qa_result.get("confidence", 0.0) if isinstance(qa_result, dict) else 0.0
 
+        # ✅ CONVERGENCE/VALIDITY GATE (align with MARAG orchestrator)
+        try:
+            from agents.validation.convergence_gate import ConvergenceValidityGate
+            from agents.regulators.granularity_regulator import GranularityRegulator
+            gate = getattr(self, "convergence_gate", None) or ConvergenceValidityGate()
+            
+            # Use ProtectedAnswerManager (same as orchestrator) - read-only
+            protected_answers = {}
+            slot = None
+            try:
+                if hasattr(self, "protected_answer_manager"):
+                    protected_answers = self.protected_answer_manager.get_protected_answers()  # read-only
+                    # Extract slot from slot_candidates (same as orchestrator)
+                    if isinstance(qa_result, dict):
+                        slot_candidates = qa_result.get("slot_candidates", [])
+                        if slot_candidates:
+                            slot = slot_candidates[0].get("slot")
+                        else:
+                            slot = qa_result.get("slot")
+                else:
+                    # Fallback if manager not available
+                    protected_answers = {}
+            except Exception as e:
+                logger.debug(f"[DebugGate] Error getting protected_answers: {e}")
+                protected_answers = {}
+            
+            required_domain = None
+            required_level = None
+            try:
+                required_domain, required_level, _ = GranularityRegulator.infer_required(
+                    plan_goal, _capture_state.get("stabilized_query") or ""
+                )
+            except Exception:
+                pass
+            
+            gate_decision = gate.evaluate(
+                qa_result=qa_result if isinstance(qa_result, dict) else {},
+                protected_answers=protected_answers,
+                required_domain=required_domain,
+                required_level=required_level,
+                slot=slot,
+            )
+            
+            # Add logging to see gate decisions
+            answer_preview = qa_result.get("answer", "")[:30] if isinstance(qa_result, dict) else ""
+            logger.info(
+                f"[DebugGate] Step {step.get('id', 'unknown')}: "
+                f"decision={gate_decision.get('decision')}, "
+                f"reason={gate_decision.get('reason')}, "
+                f"answer='{answer_preview}...', "
+                f"slot={slot}"
+            )
+            
+            result["gate_decision"] = gate_decision
+
+            if gate_decision.get("decision") == "reject":
+                result["success"] = False
+                result["aborted_by_gate"] = True
+                result.setdefault("debug_metadata", {})
+                result["debug_metadata"]["gate"] = gate_decision
+                return result
+
+            if gate_decision.get("decision") == "needs_more_evidence":
+                result["success"] = False
+                result["needs_more_evidence"] = True
+                result["aborted_by_gate"] = True
+                result.setdefault("debug_metadata", {})
+                result["debug_metadata"]["gate"] = gate_decision
+                return result
+        except Exception as _gate_err:
+            dm = result.get("debug_metadata", {}) if isinstance(result, dict) else {}
+            if not isinstance(dm, dict):
+                dm = {}
+            dm["gate_error"] = str(_gate_err)
+            if isinstance(result, dict):
+                result["debug_metadata"] = dm
+
         # ✅ NEW: Surface orchestrator step-level debug metadata into hop-level debug metadata
         step_debug_metadata = result.get("debug_metadata", {}) if isinstance(result, dict) else {}
         if isinstance(step_debug_metadata, dict) and step_debug_metadata:
@@ -806,8 +1158,6 @@ def patch_orchestrator_for_debugging(orchestrator):
             dm["oscillation"] = oscillation
             _capture_state["debug_metadata"] = dm
 
-            # Update baseline for next hop within the same trace
-            _capture_state["prev_stabilized_query"] = stabilized_q
         except Exception as _e:
             dm = _capture_state.get("debug_metadata", {})
             if not isinstance(dm, dict):
@@ -880,6 +1230,25 @@ def patch_orchestrator_for_debugging(orchestrator):
 
             # Oscillation flag from velocity (if direction flips)
             oscillating = (direction_cosine is not None and direction_cosine < 0)
+            # Alert when oscillation + large displacement
+            THRESH_DELTA = 0.5
+            oscillation_alert = (
+                oscillating
+                and delta_norm is not None
+                and delta_norm > THRESH_DELTA
+            )
+
+            # Token churn from across-hop oscillation (if available)
+            osc_tokens_added = []
+            osc_tokens_removed = []
+            try:
+                osc_meta = dm.get("oscillation", {}) if isinstance(dm, dict) else {}
+                across_meta = osc_meta.get("across_hop", {}) if isinstance(osc_meta, dict) else {}
+                osc_tokens_added = across_meta.get("tokens_added", []) or []
+                osc_tokens_removed = across_meta.get("tokens_removed", []) or []
+            except Exception:
+                osc_tokens_added = []
+                osc_tokens_removed = []
 
             dm = _capture_state.get("debug_metadata", {})
             if not isinstance(dm, dict):
@@ -888,7 +1257,14 @@ def patch_orchestrator_for_debugging(orchestrator):
                 "delta_norm": delta_norm,
                 "direction_cosine": direction_cosine,
                 "oscillating": oscillating,
+                "oscillation_alert": oscillation_alert,
                 "has_embedding": curr_emb is not None,
+                "oscillation_tokens_added": osc_tokens_added,
+                "oscillation_tokens_removed": osc_tokens_removed,
+                "has_token_churn": bool(osc_tokens_added or osc_tokens_removed),
+                "token_churn_scope": "across_hop",
+                # Explicit signal flag to avoid false positives/negatives
+                "has_velocity_signal": direction_cosine is not None,
             }
             _capture_state["debug_metadata"] = dm
 
@@ -913,8 +1289,39 @@ def patch_orchestrator_for_debugging(orchestrator):
             dm["velocity_error"] = str(_e)
             _capture_state["debug_metadata"] = dm
 
+        # Apply experimental seatbelt (next-hop only; current hop untouched)
+        try:
+            dm = _capture_state.get("debug_metadata", {})
+            if not isinstance(dm, dict):
+                dm = {}
+            next_prev_query, stab_meta = _experimental_stabilizer_reinject_entities(
+                _capture_state.get("prev_stabilized_query") or _capture_state.get("stabilized_query", ""),
+                _capture_state.get("stabilized_query", "") or "",
+                dm.get("velocity", {}),
+            )
+            dm["stabilizer"] = stab_meta
+            _capture_state["debug_metadata"] = dm
+            # Update baseline for next hop within the same trace (with optional reinjection)
+            _capture_state["prev_stabilized_query"] = next_prev_query
+        except Exception as _e:
+            dm = _capture_state.get("debug_metadata", {})
+            if not isinstance(dm, dict):
+                dm = {}
+            dm["stabilizer_error"] = str(_e)
+            _capture_state["debug_metadata"] = dm
+        
         # Capture hop trace
         try:
+            # Ensure entropy_guard metadata survives into the captured hop even if debug_metadata was overwritten
+            dm_final = _capture_state.get("debug_metadata", {})
+            if not isinstance(dm_final, dict):
+                dm_final = {}
+            if "entropy_guard" not in dm_final:
+                eg_meta = (_capture_state.get("retrieval_params", {}) or {}).get("entropy_guard_meta")
+                if eg_meta:
+                    dm_final["entropy_guard"] = eg_meta
+            _capture_state["debug_metadata"] = dm_final
+
             debugger.capture_hop(
                 hop=hop,
                 step_id=_capture_state['current_step_id'],
@@ -961,11 +1368,53 @@ async def debug_evaluate_dataset(dataset_name: str, num_examples: int = 5):
     print(f"\nEvaluating {dataset_name} with {num_examples} examples")
     print("Capturing comprehensive reasoning traces...")
     
-    # Load dataset
+    # Load dataset (mirror evaluate_datasets: HF first, GitHub fallback for MuSiQue)
+    from datasets import load_dataset
     from agents.musique_document_loader import _load_musique_from_github, load_musique_example_context_as_documents
+
+    # Slice controls: set start/end once to choose which questions to run
+    start_idx =0
+    end_idx = 5  # run questions 51–55 (0-based); adjust as needed
+
+    try:
+        # Map dataset name to HF identifier when needed
+        if dataset_name.lower() == "musique":
+            dataset_name_full = "MuSiQue"
+            dataset_config = None
+        else:
+            dataset_name_full = dataset_name
+            dataset_config = None
+
+        ds = load_dataset(dataset_name_full, dataset_config)
+        examples = ds["validation"]
+    except Exception as e:
+        if dataset_name.lower() == "musique":
+            print(f"⚠️  HuggingFace load failed: {e}")
+            print("Attempting to load from GitHub repository...")
+            try:
+                raw = _load_musique_from_github("validation")
+
+                class SimpleDataset:
+                    def __init__(self, data):
+                        self.data = data
+
+                    def select(self, idxs):
+                        return [self.data[i] for i in idxs]
+
+                examples = SimpleDataset(raw)
+            except Exception as e2:
+                raise RuntimeError(f"Failed to load MuSiQue from GitHub: {e2}")
+        else:
+            raise
+
+    # Apply slicing once, accommodating both HF Dataset and list fallback
+    if hasattr(examples, "select"):          # HF Dataset
+        eval_examples = examples.select(range(start_idx, end_idx))
+    else:                                    # list from fallback
+        eval_examples = examples[start_idx:end_idx]
+
+    num_examples = len(eval_examples)
     
-    examples = _load_musique_from_github("validation")
-    eval_examples = examples[:num_examples]
     
     # Create orchestrator
     from agents.mixed_model_orchestrator import create_optimized_marag_pipeline
@@ -1000,6 +1449,22 @@ async def debug_evaluate_dataset(dataset_name: str, num_examples: int = 5):
             
             # Execute pipeline
             result = await orchestrator.execute_pipeline(question)
+
+            # If any step aborted by gate, skip final assembly and mark trace
+            aborted = False
+            if isinstance(result, dict):
+                steps = result.get("reasoning_trajectory") or result.get("step_results") or []
+                for st in steps:
+                    gd = st.get("gate_decision") or st.get("debug_metadata", {}).get("gate")
+                    if st.get("aborted_by_gate") or (isinstance(gd, dict) and gd.get("decision") != "accept"):
+                        aborted = True
+                        break
+            if aborted:
+                prediction = "needs_more_evidence"
+                em = exact_match_score(prediction, ground_truth)
+                f1 = f1_score(prediction, ground_truth)
+                debugger.finish_trace(prediction, em, f1)
+                continue
             
             # Fix: Extract answer from PipelineResult object
             if hasattr(result, 'final_answer'):

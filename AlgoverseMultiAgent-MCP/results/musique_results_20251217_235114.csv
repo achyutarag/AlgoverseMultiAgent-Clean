@@ -1,0 +1,19 @@
+Question,Prediction,Ground_Truth,ExactMatch,F1Score,Latency(s),Total_Tokens,Input_Tokens,Output_Tokens
+Who is the spouse of the Green performer?,Miquette Giraudy,Miquette Giraudy,1.0,1.0,68.04,42687,32293,3064
+Who founded the company that distributed the film UHF?,Morris Mike Medavoy,Mike Medavoy,0.0,0.8,107.91,62950,44862,3624
+What administrative territorial entity is the owner of Ciudad Deportiva located?,Tamaulipas,Tamaulipas,1.0,1.0,185.40,80208,47125,4527
+Where is Ulrich Walter's employer headquartered?,German Aerospace Center,Cologne,0.0,0.0,112.84,65537,47234,3487
+Which company owns the manufacturer of Learjet 60?,Bombardier Aerospace,Bombardier Inc.,0.0,0.5,61.57,40840,31425,2062
+Who is the child of Caroline LeRoy's spouse?,Daniel Webster,Fletcher Webster,0.0,0.5,102.30,61338,44742,3030
+"Who is the grandmother of Philippe, Duke of Orléans?",Marie,Marie de' Medici,0.0,0.5,106.44,68683,51074,3204
+What is the goal of the group that European Movement Germany is a member of?,European Movement International,European integration,0.0,0.4,40.75,36946,31374,2147
+What company succeeded the owner of Empire Sports Network?,Time Warner Cable,Time Warner Cable,1.0,1.0,59.81,43720,34454,2294
+What province shares a border with the province where Lago District is located?,Lago,Cabo Delgado Province,0.0,0.0,175.31,80308,49978,3308
+
+Summary,,,,,,,,
+Exact Match,,,0.3000,,,,,
+F1 Score,,,0.5700,,,,,
+Latency/Q (s),,,102.04,,,,,
+Total Latency (s),,,1020.38,,,,,
+Tokens/Q,,,58322,,,58322,41456,3075
+Examples,,,10,,,,,

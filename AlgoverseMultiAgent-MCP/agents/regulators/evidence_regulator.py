@@ -165,7 +165,8 @@ class EvidenceRegulator(BaseRegulator):
         invalid_terms = {
             "unknown", "none", "n/a", "na", "null", "nil", 
             "not found", "not available", "no answer", "no information",
-            "unclear", "uncertain", "unsure", "ambiguous"
+            "unclear", "uncertain", "unsure", "ambiguous",
+            "yes"
         }
         return term_lower in invalid_terms
     

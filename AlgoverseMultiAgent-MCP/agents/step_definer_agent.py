@@ -110,6 +110,8 @@ Examples of good subquery generation:
         context = input_data.get('context', {})
         previous_answers = input_data.get('previous_answers', {})
         max_subqueries = min(input_data.get('max_subqueries', self.max_subqueries), 5)  # Cap at 5
+        support_signals = input_data.get("support_signals", {}) or {}
+        planner_mode = input_data.get("planner_mode", "answer")
         
         if not step or 'id' not in step:
             return AgentResponse(
@@ -137,6 +139,13 @@ Examples of good subquery generation:
             Dependencies: {', '.join(step.get('dependencies', [])) or 'None'}
             Critical: {step.get('critical', False)}
             Expected Output: {tokenization_utils.preprocess_llm_input(step.get('expected_output', 'Not specified'))}
+            
+            ### Support Signals (epistemic state):
+            - belief_count: {support_signals.get('belief_count')}
+            - evidence_terms_count: {support_signals.get('evidence_terms_count')}
+            - epistemic_support_low: {support_signals.get('epistemic_support_low')}
+            - planner_mode: {planner_mode}
+            If epistemic_support_low is true or planner_mode == "gather_context", bias toward retrieval-style, context-gathering subqueries (avoid premature direct-answer subqueries).
             """
             
             # Add context if available
@@ -502,8 +511,21 @@ Return ONLY the JSON object, no other text."""
                     continue
             
             # Add sub-queries to result
-            result["sub_queries"] = sub_queries
-            logger.info(f"Generated {len(sub_queries)} sub-queries for step {step_id}")
+            # Deduplicate near-identical sub-queries to avoid redundant hops/tie situations
+            seen_queries = set()
+            deduped = []
+            for sq in sub_queries:
+                qtext = (sq.get("query") or "").strip().lower()
+                if not qtext:
+                    continue
+                if qtext in seen_queries:
+                    logger.info(f"Dedup sub-query skipped: '{sq.get('query', '')[:80]}'")
+                    continue
+                seen_queries.add(qtext)
+                deduped.append(sq)
+
+            result["sub_queries"] = deduped
+            logger.info(f"Generated {len(deduped)} sub-queries for step {step_id}")
             
             # Add context_analysis if not present
             if "context_analysis" not in result:

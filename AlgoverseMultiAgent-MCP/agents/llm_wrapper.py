@@ -17,7 +17,9 @@ class LLMConfig(BaseModel):
     model_name: str = "gemini-2.5-flash"
     model_type: str = "google_gemini"  # google_gemini, huggingface, etc.
     device: str = "auto"  # auto, cuda, cpu, mps
-    temperature: float = 0.7
+    temperature: float = 0.0  # deterministic by default
+    top_p: float = 1.0
+    seed: int = 1234
     max_new_tokens: int = 1024
     context_length: int = 8192
     use_quantization: bool = True
@@ -103,8 +105,17 @@ class GoogleGeminiLLM(BaseLLMWrapper):
     async def generate(self, prompt: str, **kwargs) -> LLMResponse:
         """Generate text from a prompt using Google Gemini."""
         try:
+            gen_cfg = {
+                "temperature": kwargs.get("temperature", self.config.temperature),
+                "top_p": kwargs.get("top_p", getattr(self.config, "top_p", 1.0)),
+                "candidate_count": 1,
+            }
+
             # Generate response using Gemini
-            response = self.model.generate_content(prompt)
+            response = self.model.generate_content(
+                prompt,
+                generation_config=gen_cfg
+            )
             
             # Extract the generated text
             generated_text = response.text if response.text else ""
@@ -153,6 +164,10 @@ class HuggingFaceLLM(BaseLLMWrapper):
         try:
             # Configure device
             device = "cuda" if torch.cuda.is_available() and self.config.device != "cpu" else "cpu"
+            if getattr(self.config, "seed", None) is not None:
+                torch.manual_seed(self.config.seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(self.config.seed)
             
             # Load tokenizer
             self.tokenizer = AutoTokenizer.from_pretrained(
@@ -198,11 +213,14 @@ class HuggingFaceLLM(BaseLLMWrapper):
             
             # Generate response
             with torch.no_grad():
+                temperature = kwargs.get("temperature", self.config.temperature)
+                do_sample = kwargs.get("do_sample", temperature > 0)
                 outputs = self.model.generate(
                     inputs,
                     max_new_tokens=kwargs.get("max_new_tokens", self.config.max_new_tokens),
-                    temperature=kwargs.get("temperature", self.config.temperature),
-                    do_sample=True,
+                    temperature=temperature,
+                    do_sample=do_sample,
+                    top_p=kwargs.get("top_p", getattr(self.config, "top_p", 1.0)),
                     pad_token_id=self.tokenizer.eos_token_id
                 )
             

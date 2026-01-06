@@ -39,6 +39,15 @@ class ExecutionState(BaseModel):
         ),
     )
 
+    # Protected high-confidence answers per slot (monotonic, evidence-backed)
+    protected_answers: Dict[str, Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Per-slot protected answers with confidence ≥ threshold and evidence."
+    )
+
+    class Config:
+        extra = "allow"
+
 class StateManager:
     """
     Enhanced State Manager with diffusion-aware retrieval control.

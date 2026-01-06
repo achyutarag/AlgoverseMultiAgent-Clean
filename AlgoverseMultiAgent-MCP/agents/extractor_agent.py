@@ -27,7 +27,7 @@ class ExtractorAgent(BaseAgent):
         self, 
         model_config: Optional[Dict[str, Any]] = None,
         model_name: str = "gemini-2.5-flash",  # LLM for extraction
-        temperature: float = 0.3,
+        temperature: float = 0.0,
         max_tokens: int = 2048
     ):
         """
@@ -40,7 +40,7 @@ class ExtractorAgent(BaseAgent):
             max_tokens: Maximum number of tokens to generate
         """
         super().__init__("extractor_agent", model_config, model_name)
-        self.temperature = max(0.0, min(1.0, temperature))
+        self.temperature = 0.0
         self.max_tokens = max(100, min(4096, max_tokens))
         
         self.system_prompt = """You are an expert at performing fine-grained selection and aggregation of information from retrieved documents. Your task is to:
@@ -151,12 +151,24 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
         Returns:
             AgentResponse containing the extracted passages and aggregated evidence
         """
+        # Keep a shallow copy around for any retry paths
+        extractor_input = dict(input_data)
+
         query = input_data.get('query', '').strip()
         subqueries = input_data.get('subqueries', [])  # NEW: Get subqueries if provided
         documents = input_data.get('documents', [])
         history = input_data.get('history', [])
+        # Defaults
         max_documents = min(int(input_data.get('max_documents', 8)), 15)
         min_relevance = max(0.0, min(1.0, float(input_data.get('min_relevance', 0.2))))  # Lowered from 0.3 to 0.2
+        # HQ/location override: be more inclusive and keep more docs
+        lower_query = query.lower()
+        is_location_q = any(
+            kw in lower_query for kw in ["headquarter", "headquarters", "hq", "where", "located", "location", "based"]
+        )
+        if is_location_q:
+            min_relevance = min(min_relevance, 0.1)
+            max_documents = min(10, 15)
         context_needed = input_data.get('context_needed', ['factual'])
         
         # Normalize query for consistent processing
@@ -318,7 +330,7 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
             # Get the LLM response with token tracking
             response_text, token_usage = await self.generate_text_with_usage(
                 prompt=prompt,
-                temperature=self.temperature,
+                temperature=0.0,
                 max_new_tokens=self.max_tokens
             )
             # We will show the following for DEBUGGING:
@@ -367,6 +379,42 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
                     # Try to repair common JSON issues
                     repaired_response = TokenizationUtils.repair_json(clean_response)
                     result = json.loads(repaired_response)
+
+                # Fallback: if nothing meets min_relevance, keep top-1 anyway
+                passages = result.get("extracted_passages", []) or []
+                if not passages and documents:
+                    doc0 = documents[0]
+                    passages = [{
+                        "text": doc0.get("page_content", "") or doc0.get("text", ""),
+                        "document_id": doc0.get("id", "doc_1"),
+                        "chunk_id": doc0.get("metadata", {}).get("chunk_id", "chunk_1"),
+                        "relevance": 0.1,
+                        "reasoning": "Fallback: no passages met min_relevance; keeping top-1",
+                        "source_context": doc0.get("metadata", {}).get("source_context", "")
+                    }]
+                    result["extracted_passages"] = passages
+
+                # Location/HQ-specific fallback: if query is location/HQ and no passage has a location cue, keep top-1 doc
+                is_location_q = any(
+                    kw in query.lower()
+                    for kw in ["headquarter", "headquarters", "hq", "located", "location", "based in", "where", "city"]
+                )
+                def _has_location_cue(p):
+                    txt = (p.get("text") or "").lower()
+                    cues = ["headquarter", "hq", "located", "location", "based in", "city", "state", "country"]
+                    return any(c in txt for c in cues)
+                passages = result.get("extracted_passages", []) or []
+                if is_location_q and not any(_has_location_cue(p) for p in passages) and documents:
+                    doc0 = documents[0]
+                    passages.append({
+                        "text": doc0.get("page_content", "") or doc0.get("text", ""),
+                        "document_id": doc0.get("id", "doc_1"),
+                        "chunk_id": doc0.get("metadata", {}).get("chunk_id", "chunk_1"),
+                        "relevance": 0.1,
+                        "reasoning": "Location fallback: no extracted passages contained location cues; keeping top-1 document.",
+                        "source_context": doc0.get("metadata", {}).get("source_context", "")
+                    })
+                    result["extracted_passages"] = passages
                 
                 # Validate the response structure
                 required_keys = ["query", "extracted_passages"]
@@ -437,7 +485,12 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
                     except Exception:
                         valid_passages = []
                 
-                # Fallback: If no passages were extracted, create one from aggregated evidence
+                # Deterministic fallback: surface the top retrieved chunk if still empty
+                if not valid_passages and documents:
+                    logger.warning("No passages extracted after retry; using deterministic top-chunk fallback")
+                    valid_passages = self._deterministic_top_chunk_passages(documents)
+
+                # Fallback: If still no passages, create one from aggregated evidence (LLM-derived)
                 if not valid_passages and result.get("aggregated_evidence"):
                     logger.warning("No passages extracted, creating fallback passage from aggregated evidence")
                     aggregated_evidence = result.get("aggregated_evidence", "")
@@ -467,6 +520,18 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
                 logger.info(f"Extracted {len(deduplicated_passages)} relevant passages "
                           f"(min_relevance={min_relevance})")
                 
+                # Deterministic evidence term extraction from top passage (epistemic grounding)
+                evidence_terms = []
+                if deduplicated_passages:
+                    try:
+                        import re
+                        top_text = deduplicated_passages[0].get("text", "")
+                        m = re.findall(r"\b([A-Z][A-Za-z0-9]+(?:\s+[A-Z][A-Za-z0-9]+)*)\b", top_text)
+                        if m:
+                            evidence_terms = [m[0].strip()]
+                    except Exception:
+                        evidence_terms = []
+
                 # Update history
                 self._update_history("user", f"Extract relevant information for: {query}")
                 self._update_history(
@@ -485,6 +550,7 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
                             sum(p["relevance"] for p in deduplicated_passages) / len(deduplicated_passages)
                             if deduplicated_passages else 0.0
                         ),
+                        "evidence_terms": evidence_terms,
                         "context_needed": context_needed,
                         "extraction_parameters": {
                             "max_documents": max_documents,
@@ -582,6 +648,36 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
         
         similarity = len(intersection) / len(union)
         return similarity >= threshold
+    
+    def _deterministic_top_chunk_passages(
+        self, documents: List[Dict[str, Any]], max_chars: int = 320
+    ) -> List[Dict[str, Any]]:
+        """Deterministic fallback: surface the top retrieved chunk text."""
+        if not documents:
+            return []
+
+        top_doc = documents[0] or {}
+        text = str(top_doc.get("page_content", "")).strip()
+        if not text:
+            return []
+
+        snippet = text[:max_chars]
+        if len(text) > max_chars:
+            snippet = snippet + "..."
+
+        doc_id = str(top_doc.get("id", "doc_1"))
+        chunk_id = str(top_doc.get("metadata", {}).get("chunk_id", f"{doc_id}_chunk_1"))
+
+        return [
+            {
+                "text": snippet,
+                "document_id": doc_id,
+                "chunk_id": chunk_id,
+                "relevance": 0.2,
+                "reasoning": "Deterministic fallback: top retrieved chunk",
+                "source_context": "Top retrieved document",
+            }
+        ]
     
     def _fallback_extraction(self, query: str, documents: List[Dict[str, Any]], min_relevance: float) -> List[Dict[str, Any]]:
         """Fallback extraction using simple keyword matching."""
