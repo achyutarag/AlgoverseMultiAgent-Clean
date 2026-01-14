@@ -105,7 +105,9 @@ class FinalAssembler:
             
             # Synthesize final answer
             final_answer = await self._synthesize_final_answer(
-                main_query, processed_steps, query_type, reasoning_summary
+                main_query, processed_steps, query_type, reasoning_summary,
+                protected_ctx=protected_ctx, step_results=step_results,
+                protected_answer_manager=protected_answer_manager
             )
             
             # Calculate overall confidence
@@ -240,6 +242,7 @@ class FinalAssembler:
                     "sources": qa_result.get("sources", []),
                     "reasoning": qa_result.get("reasoning", ""),
                     "evidence": qa_result.get("supporting_evidence", []),
+                    "qa_result": qa_result,  # ✅ CRITICAL: Include full qa_result for slot_candidates extraction
                     "error": result.get("error", "") if not success else "",
                     "execution_order": step.get("execution_order", 0),
                     "timestamp": step.get("timestamp", "")
@@ -322,6 +325,7 @@ class FinalAssembler:
         reasoning_summary: str,
         protected_ctx: Optional[Dict[str, Any]] = None,
         step_results: Optional[List[Dict[str, Any]]] = None,
+        protected_answer_manager: Optional[Any] = None,
     ) -> str:
         """
         Synthesize the final answer from all step results.
@@ -338,7 +342,33 @@ class FinalAssembler:
         try:
             successful_steps = [s for s in processed_steps if s.get("success", False)]
             
+            # ✅ FIRST-PRINCIPLES FIX: Existence check before "insufficient evidence"
+            # Check if ANY valid answers exist, regardless of gate decisions
+            # Gate decisions affect ranking, not existence
+            valid_answers = []
+            for step in processed_steps:
+                # Extract answer from step or qa_result (even if step was rejected)
+                answer = step.get("answer", "").strip()
+                if not answer:
+                    qa_result = step.get("qa_result", {})
+                    answer = qa_result.get("answer", "").strip() if qa_result else ""
+                
+                # Valid if: has answer AND not invalid span (junk/placeholder)
+                if answer:
+                    # Quick validity check (not full validation - that's for ranking)
+                    norm = " ".join(re.sub(r"[^\w\s]", " ", answer.lower()).split())
+                    invalid_placeholders = {"yes", "no", "none", "n/a", "na", ""}
+                    if norm and norm not in invalid_placeholders and len(norm.split()) >= 2:
+                        valid_answers.append(step)
+            
+            # If valid answers exist, use them (even if all were rejected by gate)
+            if valid_answers and not successful_steps:
+                # Use valid_answers as successful_steps for synthesis
+                # Existing code will handle creating step_answers from successful_steps
+                successful_steps = valid_answers
+            
             if not successful_steps:
+                # Only return "insufficient evidence" if NO valid answers exist at all
                 return "I was unable to find sufficient information to answer your question. The reasoning steps encountered errors or insufficient evidence."
             
             # Collect all answers
@@ -346,10 +376,19 @@ class FinalAssembler:
             for step in successful_steps:
                 answer = step.get("answer", "").strip()
                 if answer:
+                    # Extract sources from step if available
+                    sources = []
+                    qa_result = step.get("qa_result", {})
+                    if qa_result:
+                        retrieved_docs = qa_result.get("retrieved_documents", [])
+                        if retrieved_docs:
+                            sources = [doc.get("id", "") or doc.get("content", "")[:50] for doc in retrieved_docs if doc]
+                    
                     step_answers.append({
                         "step": step["step_description"],
                         "answer": answer,
-                        "confidence": step["confidence"]
+                        "confidence": step.get("confidence", 0.5),
+                        "sources": sources
                     })
             
             # Synthesize based on query type
@@ -371,12 +410,17 @@ class FinalAssembler:
             elif query_type == "multi-hop":
                 # Pass processed_steps for convergence estimation (entropy trajectory, anchors)
                 final_answer = await self._synthesize_multihop_answer(
-                    main_query, step_answers, processed_steps, protected_ctx=protected_ctx, step_results=step_results
+                    main_query, step_answers, processed_steps, protected_ctx=protected_ctx, step_results=step_results,
+                    protected_answer_manager=protected_answer_manager
                 )
             elif query_type == "analytical":
                 final_answer = await self._synthesize_analytical_answer(main_query, step_answers)
             else:
-                final_answer = await self._synthesize_simple_answer(main_query, step_answers)
+                final_answer = await self._synthesize_simple_answer(
+                    main_query, step_answers,
+                    processed_steps=processed_steps,
+                    protected_answer_manager=protected_answer_manager
+                )
             
             # Post-process the answer
             final_answer = tokenization_utils.postprocess_answer(final_answer, output_type="text")
@@ -513,25 +557,28 @@ class FinalAssembler:
             entropy = step_meta.get("entropy", 0.5)
             diffusion = step_meta.get("diffusion_coefficient", 0.5)
             
-            # Calculate P_final using convergence formula
+            # Calculate P_final using Bayesian convergence formula
             alpha = 0.3  # Weight for anchor consistency (reward consistency)
             beta = 0.2   # Weight for drift penalty (penalize drift)
             gamma = 0.2  # Weight for evidence density (reward evidence)
             
-            # P_raw is the base confidence
+            # P_raw is the base confidence (likelihood)
             p_raw = confidence
             
             # Evidence density (simplified: based on number of sources)
             sources = step_answer.get("sources", [])
             evidence_density = min(1.0, len(sources) / 5.0)  # Normalize to [0, 1]
             
-            # P_final = P_raw + α·anchor_consistency - β·drift + γ·evidence_density
-            p_final = (
-                p_raw +
-                alpha * anchor_consistency -
-                beta * diffusion +
-                gamma * evidence_density
-            )
+            # ✅ FIX: Bayesian multiplicative update instead of additive
+            # Posterior = Prior × Likelihood × Evidence_factor / Normalization
+            # P_final = P_raw × (1 + α·anchor_consistency) × (1 + γ·evidence_density) × (1 - β·drift)
+            # This preserves relative ordering and is mathematically sound for probability updates
+            anchor_factor = 1.0 + alpha * anchor_consistency
+            evidence_factor = 1.0 + gamma * evidence_density
+            drift_factor = max(0.1, 1.0 - beta * diffusion)  # Prevent negative/zero
+            
+            p_final = p_raw * anchor_factor * evidence_factor * drift_factor
+            
             # Clamp to [0, 1]
             p_final = max(0.0, min(1.0, p_final))
             
@@ -561,6 +608,75 @@ class FinalAssembler:
                 "slot": slot,  # Semantic slot from QA metadata (e.g., "spouse", "performer")
             })
         
+        # ✅ FIX: Build granularity prior from query only (no candidate feedback loop)
+        def _build_granularity_posterior(candidates, gran_regulator, query):
+            """
+            Build granularity prior distribution from question only (not from candidates).
+            
+            This prevents circular dependency where candidate confidences update the posterior,
+            which then penalizes those same candidates. The prior is fixed based on what the
+            question asks for, independent of candidate answers.
+            
+            Returns:
+                Dict[str, float]: Prior probability for each level, or None if unavailable
+            """
+            if not gran_regulator:
+                return None
+            
+            # Initialize prior distribution
+            prior = {}
+            all_levels = set()
+            
+            # Collect all possible levels from the regulator
+            for domain, levels in gran_regulator.HIERARCHICAL_LEVELS.items():
+                for level_name in levels.keys():
+                    all_levels.add(level_name)
+                    prior[level_name] = 0.0
+            
+            # Build prior based on query/question only (not from candidates)
+            try:
+                prior_domain, prior_level = gran_regulator._infer_required_level(query)
+                if prior_level:
+                    # Give inferred level a boost (but not too strong to allow exploration)
+                    prior[prior_level] = 0.4
+                    # Distribute remaining probability uniformly across other levels
+                    remaining = 0.6 / max(1, len(all_levels) - 1)
+                    for level in all_levels:
+                        if level != prior_level:
+                            prior[level] = remaining
+                else:
+                    # Uniform prior if no level can be inferred from query
+                    uniform = 1.0 / max(1, len(all_levels))
+                    for level in all_levels:
+                        prior[level] = uniform
+            except Exception:
+                # Uniform prior on error
+                uniform = 1.0 / max(1, len(all_levels))
+                for level in all_levels:
+                    prior[level] = uniform
+            
+            # ✅ FIX: No candidate-based updates - prior is fixed from query only
+            # This breaks the circular dependency where candidates update posterior,
+            # which then penalizes those same candidates
+            
+            # Final normalization check (defensive)
+            total = sum(prior.values())
+            if abs(total - 1.0) > 0.001:  # Allow small floating point errors
+                if total > 0:
+                    for level in prior:
+                        prior[level] /= total
+                else:
+                    uniform = 1.0 / max(1, len(all_levels))
+                    for level in all_levels:
+                        prior[level] = uniform
+            
+            return prior
+        
+        # Build granularity posterior from candidates
+        granularity_posterior = _build_granularity_posterior(
+            answer_candidates, granularity_reg, query
+        )
+        
         # Protected answers & granularity-aware boost/penalty
         def _norm_answer(ans: str) -> str:
             import re
@@ -586,7 +702,8 @@ class FinalAssembler:
             return True
 
         def apply_protected_boost_and_level_penalty(candidates, protected_map, gran_regulator=None,
-                                                    required_domain=None, required_level=None):
+                                                    required_domain=None, required_level=None,
+                                                    granularity_posterior=None):
             confirmation_only = {"yes", "no", "unknown", "none", "n/a", "na", ""}
             for cand in candidates:
                 slot = cand.get("slot") or "default"
@@ -620,12 +737,27 @@ class FinalAssembler:
                 if ev_count == 0:
                     boost -= 0.02
 
-                # Penalize granularity violation using required_domain/level (not inferred from candidate)
-                if gran_regulator and (required_domain or required_level):
+                # ✅ LAYER 3: Posterior-based granularity scoring (replaces fixed -0.03 penalty)
+                if gran_regulator:
                     try:
                         dom, lvl, _ = gran_regulator.classify_entity_level(cand.get("answer", ""))
-                        if gran_regulator.is_level_violation(required_domain, required_level, dom, lvl):
-                            boost -= 0.03
+                        if lvl:
+                            if granularity_posterior:
+                                # Use posterior probability: lower probability = stronger penalty
+                                level_prob = granularity_posterior.get(lvl, 0.0)
+                                # Penalty is proportional to (1 - probability)
+                                # High probability (0.9) → small penalty (0.01)
+                                # Low probability (0.1) → large penalty (0.09)
+                                granularity_penalty = (1.0 - level_prob) * 0.1
+                                boost -= granularity_penalty
+                                logger.debug(
+                                    f"[FinalAssembler] Granularity scoring for '{cand.get('answer', '')}': "
+                                    f"level={lvl}, posterior={level_prob:.3f}, penalty={granularity_penalty:.3f}"
+                                )
+                            elif required_domain or required_level:
+                                # Fallback to old method if posterior unavailable
+                                if gran_regulator.is_level_violation(required_domain, required_level, dom, lvl):
+                                    boost -= 0.03
                     except Exception:
                         pass
 
@@ -647,43 +779,141 @@ class FinalAssembler:
         # Get protected answers from manager (read-only) if available
         _protected_answers_local = {}
         target_slot = None
+        
         try:
             # Use protected_answer_manager if passed
             if protected_answer_manager:
-                _protected_answers_local = protected_answer_manager.get_protected_answers()  # read-only
-                target_slot = protected_answer_manager.target_slot  # Get target slot (read-only)
+                # ✅ FIX #3: Defensive checks before accessing
+                if not hasattr(protected_answer_manager, 'target_slot'):
+                    logger.warning(
+                        f"[Assembler] protected_answer_manager missing 'target_slot' attribute. "
+                        f"Manager type: {type(protected_answer_manager)}"
+                    )
+                else:
+                    try:
+                        _protected_answers_local = protected_answer_manager.get_protected_answers()  # read-only
+                        target_slot = protected_answer_manager.target_slot  # Get target slot (read-only)
+                        
+                        # ✅ FIX #3: Validate target_slot value
+                        if target_slot is None:
+                            logger.warning(
+                                f"[Assembler] protected_answer_manager.target_slot is None! "
+                                f"Manager type: {type(protected_answer_manager)}, "
+                                f"Manager state: {hasattr(protected_answer_manager, '_target_slot')}"
+                            )
+                        elif target_slot == "default":
+                            logger.warning(
+                                f"[Assembler] target_slot='default' (inference may have failed). "
+                                f"Main query: '{query[:60]}...'"
+                            )
+                    except AttributeError as e:
+                        logger.warning(
+                            f"[Assembler] AttributeError accessing target_slot: {e}. "
+                            f"Manager type: {type(protected_answer_manager)}"
+                        )
+                        target_slot = None
+                    except Exception as e:
+                        logger.warning(
+                            f"[Assembler] Unexpected error accessing target_slot: {type(e).__name__}: {e}"
+                        )
+                        target_slot = None
             else:
                 # Fallback: try to get from function closure or default empty dict
                 _protected_answers_local = {}
-        except Exception:
+                logger.debug("[Assembler] protected_answer_manager not provided")
+                
+        except Exception as e:
+            # ✅ FIX #3: More specific exception handling
+            logger.warning(
+                f"[Assembler] Failed to get target_slot from protected_answer_manager: "
+                f"{type(e).__name__}: {e}"
+            )
             _protected_answers_local = {}
+            target_slot = None  # Explicitly set to None
 
-        # Apply deterministic boost for target slot match (enforces question semantics)
-        SLOT_PRIORITY_BOOST = 0.2  # Strong boost for semantic correctness
-        if target_slot:
-            for candidate in answer_candidates:
-                slot = candidate.get("slot")
-                if slot and slot == target_slot:
-                    candidate["p_final"] = min(1.0, candidate.get("p_final", 0.0) + SLOT_PRIORITY_BOOST)
-                    logger.debug(
-                        f"[Assembler] Boosted candidate '{candidate.get('answer', '')[:30]}...' "
-                        f"(slot='{slot}' matches target_slot='{target_slot}', p_final={candidate.get('p_final', 0.0):.3f})"
-                    )
-
+        # ✅ FIX #3: Fallback inference if target_slot is None or "default"
+        if not target_slot or target_slot == "default":
+            logger.info(f"[Assembler] Attempting fallback slot inference from main_query: '{query[:60]}...'")
+            try:
+                from .qa_agent import QAAgent
+                # Create temporary QA agent for inference (or use existing one if available)
+                # Note: This is a fallback - ideally target_slot should already be set
+                temp_qa = QAAgent()
+                target_slot_fallback = temp_qa._infer_slot(query, step_context=None)
+                if target_slot_fallback and target_slot_fallback != "default":
+                    logger.info(f"[Assembler] ✅ Fallback inference succeeded: target_slot='{target_slot_fallback}'")
+                    target_slot = target_slot_fallback
+                else:
+                    logger.warning(f"[Assembler] Fallback inference also returned '{target_slot_fallback}'")
+            except Exception as e:
+                logger.warning(f"[Assembler] Fallback inference failed: {type(e).__name__}: {e}")
+        
+        # First apply protected-answers boost and granularity penalties
         apply_protected_boost_and_level_penalty(
             answer_candidates,
             _protected_answers_local,
             gran_regulator=granularity_reg,
             required_domain=required_domain,
             required_level=required_level,
+            granularity_posterior=granularity_posterior,
         )
         
-        # ✅ CONCISE: Only log top 3 candidates with essential info
-        logger.debug(f"Convergence ranking (top 3 by P_final):")
+        # Apply deterministic slot-priority boost LAST (enforces question semantics)
+        SLOT_PRIORITY_BOOST = 0.2  # Strong boost for semantic correctness
+        
+        # ✅ DEBUG: Log target_slot and candidates before boost
+        logger.info(f"[Assembler] Slot boost check: target_slot='{target_slot}', candidates before boost:")
+        for i, c in enumerate(answer_candidates[:3]):
+            logger.info(f"  [{i+1}] answer='{c.get('answer', '')[:30]}...', slot='{c.get('slot')}', p_final={c.get('p_final', 0.0):.3f}")
+        
+        if target_slot:
+            boosted_count = 0
+            for candidate in answer_candidates:
+                slot = candidate.get("slot")
+                if slot and slot == target_slot:
+                    old_p_final = candidate.get("p_final", 0.0)
+                    candidate["p_final"] = min(1.0, old_p_final + SLOT_PRIORITY_BOOST)
+                    boosted_count += 1
+                    logger.info(
+                        f"[Assembler] ✅ Boosted candidate '{candidate.get('answer', '')[:30]}...' "
+                        f"(slot='{slot}' matches target_slot='{target_slot}', p_final {old_p_final:.3f} → {candidate.get('p_final', 0.0):.3f})"
+                    )
+            if boosted_count == 0:
+                available_slots = [c.get("slot") for c in answer_candidates if c.get("slot")]
+                logger.warning(
+                    f"[Assembler] ⚠️ No candidates matched target_slot='{target_slot}'! "
+                    f"Available slots: {list(set(available_slots))}"
+                )
+        else:
+            # ✅ FIX #4: Enhance logging when target_slot is None
+            logger.warning(
+                f"[Assembler] ⚠️ target_slot is None! Cannot apply slot-priority boost. "
+                f"protected_answer_manager={protected_answer_manager}, "
+                f"manager.target_slot={getattr(protected_answer_manager, 'target_slot', 'N/A') if protected_answer_manager else 'N/A'}"
+            )
+
+        # Final global sort: explicitly favor target_slot in ties
+        def _final_sort_key(cand: Dict[str, Any]):
+            is_target = bool(target_slot and cand.get("slot") == target_slot)
+            hop = cand.get("hop") or 0
+            return (
+                is_target,                       # Prefer target slot
+                cand.get("p_final", 0.0),        # Then by final score
+                cand.get("confidence", 0.0),     # Then by confidence
+                -hop,                            # Then by recency (later hop wins)
+            )
+
+        answer_candidates.sort(key=_final_sort_key, reverse=True)
+        
+        # ✅ DEBUG: Log final ranking after sort (including slot info)
+        logger.info(f"[Assembler] Final ranking after slot boost and sort (target_slot='{target_slot}'):")
         for i, candidate in enumerate(answer_candidates[:3]):
-            logger.debug(
+            is_target = bool(target_slot and candidate.get("slot") == target_slot)
+            logger.info(
                 f"  [{i+1}] P_final={candidate['p_final']:.3f} | "
                 f"answer='{candidate['answer'][:40]}...' | "
+                f"slot='{candidate.get('slot')}' | "
+                f"is_target={is_target} | "
                 f"anchor_cons={candidate['anchor_consistency']:.2f} | "
                 f"drift={candidate['drift']:.2f}"
             )
@@ -793,8 +1023,14 @@ class FinalAssembler:
         synthesis += f"\nThis analytical approach provides a systematic investigation of your question."
         return synthesis
     
-    async def _synthesize_simple_answer(self, query: str, step_answers: List[Dict[str, Any]]) -> str:
-        """Synthesize answer for simple questions - produce concise answers."""
+    async def _synthesize_simple_answer(
+        self, 
+        query: str, 
+        step_answers: List[Dict[str, Any]],
+        processed_steps: Optional[List[Dict[str, Any]]] = None,
+        protected_answer_manager: Optional[Any] = None
+    ) -> str:
+        """Synthesize answer for simple questions using convergence estimation."""
         if not step_answers:
             return "No information found to answer your question."
         
@@ -948,15 +1184,247 @@ class FinalAssembler:
                         return "No"
                 else:
                     # Fallback: if we can't determine, check if last step has yes/no
-                    best_answer = await self._select_best_answer_for_question(query, step_answers)
+                    best_answer = await self._select_best_answer_for_question(
+                        query, step_answers, processed_steps=processed_steps, 
+                        protected_answer_manager=protected_answer_manager
+                    )
                     answer_lower = best_answer["answer"].lower()
                     yes_no_match = re.search(r'\b(yes|no)\b', answer_lower)
                     if yes_no_match:
                         return yes_no_match.group(1).capitalize()
         
-        # For single answer, use it directly
+        # ✅ FIX: Use same convergence estimation as multi-hop
+        # Precompute required granularity once (do not infer from candidates)
+        try:
+            from .regulators.granularity_regulator import GranularityRegulator
+            granularity_reg = GranularityRegulator()
+            required_domain, required_level = granularity_reg._infer_required_level(query)
+        except Exception:
+            granularity_reg = None
+            required_domain, required_level = (None, None)
+        
+        # Build granularity prior from query only (same as multi-hop)
+        def _build_granularity_prior(gran_regulator, query):
+            """Build granularity prior distribution from question only."""
+            if not gran_regulator:
+                return None
+            
+            prior = {}
+            all_levels = set()
+            
+            for domain, levels in gran_regulator.HIERARCHICAL_LEVELS.items():
+                for level_name in levels.keys():
+                    all_levels.add(level_name)
+                    prior[level_name] = 0.0
+            
+            try:
+                prior_domain, prior_level = gran_regulator._infer_required_level(query)
+                if prior_level:
+                    prior[prior_level] = 0.4
+                    remaining = 0.6 / max(1, len(all_levels) - 1)
+                    for level in all_levels:
+                        if level != prior_level:
+                            prior[level] = remaining
+                else:
+                    uniform = 1.0 / max(1, len(all_levels))
+                    for level in all_levels:
+                        prior[level] = uniform
+            except Exception:
+                uniform = 1.0 / max(1, len(all_levels))
+                for level in all_levels:
+                    prior[level] = uniform
+            
+            # Normalize
+            total = sum(prior.values())
+            if abs(total - 1.0) > 0.001 and total > 0:
+                for level in prior:
+                    prior[level] /= total
+            elif total == 0:
+                uniform = 1.0 / max(1, len(all_levels))
+                for level in all_levels:
+                    prior[level] = uniform
+            
+            return prior
+        
+        granularity_posterior = _build_granularity_prior(granularity_reg, query)
+        
+        # Build answer candidates with p_final scoring
+        answer_candidates = []
+        for i, step_answer in enumerate(step_answers):
+            answer = step_answer.get("answer", "")
+            confidence = step_answer.get("confidence", 0.5)
+            
+            # Get diffusion metadata if available
+            step_meta = {}
+            if processed_steps and i < len(processed_steps):
+                qa_result = processed_steps[i].get("qa_result", {})
+                step_meta = qa_result.get("diffusion_metadata", {})
+            
+            anchor_consistency = step_meta.get("anchor_consistency", 0.5)
+            entropy = step_meta.get("entropy", 0.5)
+            diffusion = step_meta.get("diffusion_coefficient", 0.5)
+            
+            # Calculate P_final using Bayesian convergence formula (same as multi-hop)
+            alpha = 0.3
+            beta = 0.2
+            gamma = 0.2
+            
+            p_raw = confidence
+            sources = step_answer.get("sources", [])
+            evidence_density = min(1.0, len(sources) / 5.0)
+            
+            # Multiplicative Bayesian update
+            anchor_factor = 1.0 + alpha * anchor_consistency
+            evidence_factor = 1.0 + gamma * evidence_density
+            drift_factor = max(0.1, 1.0 - beta * diffusion)
+            
+            p_final = p_raw * anchor_factor * evidence_factor * drift_factor
+            p_final = max(0.0, min(1.0, p_final))
+            
+            # Extract slot
+            slot = "default"
+            if processed_steps and i < len(processed_steps):
+                qa_result = processed_steps[i].get("qa_result", {})
+                slot_candidates = qa_result.get("slot_candidates", [])
+                if slot_candidates and len(slot_candidates) > 0:
+                    slot = slot_candidates[0].get("slot", "default")
+                else:
+                    slot = processed_steps[i].get("step_id", "default")
+            
+            answer_candidates.append({
+                "answer": answer,
+                "p_final": p_final,
+                "p_raw": p_raw,
+                "anchor_consistency": anchor_consistency,
+                "drift": diffusion,
+                "evidence_density": evidence_density,
+                "entropy": entropy,
+                "hop": i + 1,
+                "has_supporting_evidence": bool(sources),
+                "sources": sources,
+                "confidence": confidence,
+                "slot": slot,
+            })
+        
+        # Apply protected answers boost and granularity penalties (same as multi-hop)
+        def _norm_answer(ans: str) -> str:
+            return " ".join(re.sub(r"[^\w\s]", " ", (ans or "").lower()).split())
+
+        def is_valid_span(ans: str) -> bool:
+            """Layer-1 validity gate."""
+            if not ans:
+                return False
+            norm = " ".join(re.sub(r"[^\w\s]", " ", str(ans).lower()).split())
+            if not norm:
+                return False
+            confirmations = {"yes", "no", "unknown", "none", "n/a", "na", ""}
+            if norm in confirmations:
+                return False
+            articles = {"the", "a", "an"}
+            tokens = norm.split()
+            if all(tok in articles for tok in tokens):
+                return False
+            if len(tokens) < 2 and len(norm) < 6:
+                return False
+            return True
+
+        def apply_protected_boost_and_level_penalty(candidates, protected_map, gran_regulator=None,
+                                                    required_domain=None, required_level=None,
+                                                    granularity_posterior=None):
+            confirmation_only = {"yes", "no", "unknown", "none", "n/a", "na", ""}
+            for cand in candidates:
+                slot = cand.get("slot") or "default"
+                pa = protected_map.get(slot)
+                cand_norm = _norm_answer(cand.get("answer", ""))
+                ev_count = len(cand.get("sources") or [])
+                boost = 0.0
+                protected_match = False
+
+                # Layer 1: validity gate
+                if not is_valid_span(cand.get("answer", "")):
+                    cand["p_final"] = 0.0
+                    cand["confidence"] = 0.0
+                    cand["is_protected_match"] = False
+                    continue
+
+                # Drop/penalize unknown/confirmation answers
+                if cand_norm in confirmation_only:
+                    cand["p_final"] = 0.0
+                    cand["confidence"] = 0.0
+                    cand["is_protected_match"] = False
+                    continue
+
+                # Boost if matches protected answer
+                if pa and cand_norm == pa.get("normalized"):
+                    protected_match = True
+                    boost += 0.1
+                    boost += min(0.01 * pa.get("evidence_count", pa.get("evidence", 0)), 0.03)
+
+                # Penalize zero evidence
+                if ev_count == 0:
+                    boost -= 0.02
+
+                # ✅ LAYER 3: Posterior-based granularity scoring
+                if gran_regulator:
+                    try:
+                        dom, lvl, _ = gran_regulator.classify_entity_level(cand.get("answer", ""))
+                        if lvl:
+                            if granularity_posterior:
+                                level_prob = granularity_posterior.get(lvl, 0.0)
+                                granularity_penalty = (1.0 - level_prob) * 0.1
+                                boost -= granularity_penalty
+                                logger.debug(
+                                    f"[FinalAssembler] Granularity scoring for '{cand.get('answer', '')}': "
+                                    f"level={lvl}, posterior={level_prob:.3f}, penalty={granularity_penalty:.3f}"
+                                )
+                            elif required_domain or required_level:
+                                if gran_regulator.is_level_violation(required_domain, required_level, dom, lvl):
+                                    boost -= 0.03
+                    except Exception:
+                        pass
+
+                cand["p_final"] = min(1.0, max(0.0, cand.get("p_final", 0.0) + boost))
+                cand["is_protected_match"] = protected_match
+
+            # Sort by: protected match, evidence count, confidence, hop recency, then p_final
+            candidates.sort(
+                key=lambda c: (
+                    c.get("is_protected_match", False),
+                    len(c.get("sources") or []),
+                    c.get("confidence", 0.0),
+                    c.get("hop", 0),
+                    c.get("p_final", 0.0),
+                ),
+                reverse=True,
+            )
+
+        # Get protected answers
+        _protected_answers_local = {}
+        if protected_answer_manager:
+            try:
+                _protected_answers_local = protected_answer_manager.get_protected_answers()
+            except Exception:
+                _protected_answers_local = {}
+        
+        # Apply protected-answers boost and granularity penalties
+        apply_protected_boost_and_level_penalty(
+            answer_candidates,
+            _protected_answers_local,
+            gran_regulator=granularity_reg,
+            required_domain=required_domain,
+            required_level=required_level,
+            granularity_posterior=granularity_posterior,
+        )
+        
+        # Select best candidate based on p_final
+        best_candidate = answer_candidates[0] if answer_candidates else None
+        
+        if not best_candidate:
+            return "No information found to answer your question."
+        
+        # For single answer, use best candidate (with scoring applied)
         if len(step_answers) == 1:
-            answer = step_answers[0]["answer"]
+            answer = best_candidate["answer"]
             
             # If original question asks for entity name but answer is yes/no, extract from evidence
             if is_entity_name_question and answer.lower().strip() in ["yes", "no"]:
@@ -988,8 +1456,12 @@ class FinalAssembler:
             answer = self._extract_concise_answer(query, answer)
             return answer
         
-        # For multiple answers (non-both questions), intelligently select the one that best matches the question
-        best_answer = await self._select_best_answer_for_question(query, step_answers)
+        # For multiple answers (non-both questions), use best candidate from scoring
+        best_answer = {
+            "answer": best_candidate["answer"],
+            "confidence": best_candidate.get("confidence", 0.5),
+            "p_final": best_candidate.get("p_final", 0.5),
+        }
         
         # If original question asks for entity name but best answer is yes/no, extract from evidence
         if is_entity_name_question and best_answer.get("answer", "").lower().strip() in ["yes", "no"]:
@@ -1042,13 +1514,66 @@ class FinalAssembler:
         
         return answer
     
-    async def _select_best_answer_for_question(self, query: str, step_answers: List[Dict[str, Any]]) -> Dict[str, Any]:
+    async def _select_best_answer_for_question(
+        self, 
+        query: str, 
+        step_answers: List[Dict[str, Any]],
+        processed_steps: Optional[List[Dict[str, Any]]] = None,
+        protected_answer_manager: Optional[Any] = None
+    ) -> Dict[str, Any]:
         """
-        Select which step's answer best matches the original question.
-        Original approach: use the last step answer (was getting 0.77 F1).
+        Select which step's answer best matches the original question using convergence scoring.
+        
+        ✅ FIX: Uses p_final scoring instead of just last step.
         """
-        # Simple: use last step answer (original behavior)
-        return step_answers[-1]
+        if not step_answers:
+            return {"answer": "No information found.", "confidence": 0.0}
+        
+        # ✅ FIX: Use same convergence scoring as multi-hop
+        # Build candidates with p_final
+        answer_candidates = []
+        
+        for i, step_answer in enumerate(step_answers):
+            answer = step_answer.get("answer", "")
+            confidence = step_answer.get("confidence", 0.5)
+            
+            step_meta = {}
+            if processed_steps and i < len(processed_steps):
+                qa_result = processed_steps[i].get("qa_result", {})
+                step_meta = qa_result.get("diffusion_metadata", {})
+            
+            anchor_consistency = step_meta.get("anchor_consistency", 0.5)
+            diffusion = step_meta.get("diffusion_coefficient", 0.5)
+            sources = step_answer.get("sources", [])
+            evidence_density = min(1.0, len(sources) / 5.0)
+            
+            # Bayesian multiplicative update
+            alpha, beta, gamma = 0.3, 0.2, 0.2
+            anchor_factor = 1.0 + alpha * anchor_consistency
+            evidence_factor = 1.0 + gamma * evidence_density
+            drift_factor = max(0.1, 1.0 - beta * diffusion)
+            
+            p_final = confidence * anchor_factor * evidence_factor * drift_factor
+            p_final = max(0.0, min(1.0, p_final))
+            
+            answer_candidates.append({
+                "answer": answer,
+                "p_final": p_final,
+                "confidence": confidence,
+                "hop": i + 1,
+                "sources": sources,
+            })
+        
+        # Sort by p_final (highest first)
+        answer_candidates.sort(key=lambda c: c.get("p_final", 0.0), reverse=True)
+        
+        # Return best candidate
+        best = answer_candidates[0] if answer_candidates else step_answers[-1]
+        return {
+            "answer": best.get("answer", ""),
+            "confidence": best.get("confidence", 0.5),
+            "p_final": best.get("p_final", 0.5),
+        }
     
     def _classify_question_type(self, query: str) -> str:
         """Classify what type of answer the question is asking for."""

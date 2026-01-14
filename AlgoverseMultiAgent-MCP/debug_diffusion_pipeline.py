@@ -1374,7 +1374,7 @@ async def debug_evaluate_dataset(dataset_name: str, num_examples: int = 5):
 
     # Slice controls: set start/end once to choose which questions to run
     start_idx =0
-    end_idx = 5  # run questions 51–55 (0-based); adjust as needed
+    end_idx = 10  # run questions 51–55 (0-based); adjust as needed
 
     try:
         # Map dataset name to HF identifier when needed

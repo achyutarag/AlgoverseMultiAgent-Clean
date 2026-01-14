@@ -168,9 +168,8 @@ class RegulatorManager:
                 entity = entities[0] if entities else None
             
             if entity:
-                # ✅ GENERALIZED SAFEGUARD: Check if entity violates hierarchical constraints
-                # This is a defense-in-depth check (EntityRegulator already filters, but this ensures)
-                # Uses GranularityRegulator's level system instead of hardcoded location terms
+                # ✅ FIX: Annotate instead of filter
+                entity_metadata = None
                 if granularity_constraint:
                     from .granularity_regulator import GranularityRegulator
                     granularity_reg = GranularityRegulator()
@@ -178,36 +177,25 @@ class RegulatorManager:
                     required_level = granularity_constraint.parameters.get("required_level")
                     
                     if required_domain and required_level:
-                        # Classify entity's hierarchical level
-                        entity_domain, entity_level, _ = granularity_reg.classify_entity_level(entity)
-                        
-                        # Check if entity violates required level
-                        is_violation = granularity_reg.is_level_violation(
-                            required_domain, required_level,
-                            entity_domain, entity_level
-                        )
-                        
-                        if is_violation:
-                            # Try to extract parent-level entity name (generalized extraction)
-                            parent_name = granularity_reg.extract_parent_level_name(
+                        # Compute granularity metadata
+                        entity_metadata = granularity_reg.compute_granularity_metadata(
                                 entity, required_domain, required_level
                             )
                             
-                            if parent_name:
-                                entity = parent_name
+                        logger.debug(
+                            f"EntityRegulator (safeguard): Annotated entity '{entity}': "
+                            f"delta={entity_metadata.get('granularity_delta')}, "
+                            f"violation={entity_metadata.get('granularity_violation')}"
+                        )
+                        
+                        # ✅ FIX: Always preserve entity, but log violation
+                        if entity_metadata.get("granularity_violation"):
                                 logger.info(
-                                    f"EntityRegulator (safeguard): Extracted parent-level entity '{entity}' "
-                                    f"(required: {required_domain}/{required_level}, "
-                                    f"entity: {entity_domain}/{entity_level}) "
-                                    f"to help retrieval while respecting hierarchical constraint"
-                                )
-                            else:
-                                logger.info(
-                                    f"EntityRegulator (safeguard): Skipping entity anchor '{entity}' "
-                                    f"because it violates required level {required_domain}/{required_level} "
-                                    f"(could not extract parent-level name)"
-                                )
-                                return query  # Don't anchor, return query as-is
+                                f"EntityRegulator (safeguard): Entity '{entity}' violates granularity "
+                                f"(required: {required_domain}/{required_level}, "
+                                f"got: {entity_metadata.get('entity_domain')}/{entity_metadata.get('entity_level')}), "
+                                f"but preserving for downstream scoring"
+                            )
                 
                 # Check if entity (or its parts) is already in query
                 entity_lower = entity.lower()
@@ -273,44 +261,17 @@ class RegulatorManager:
         
         
         
-        # Granularity Regulator: Initial boundary condition (enforce hierarchical level with domain)
+        # Granularity Regulator: Initial boundary condition (track but don't inject)
         elif constraint_type == "boundary" and "granularity" in constraint.regulator_name.lower():
-            level_keywords = params.get("level_keywords", [])
-            needs_modification = params.get("needs_modification", False)
             required_domain = params.get("required_domain")
             required_level = params.get("required_level")
-            query_has_level_keyword = params.get("query_has_level_keyword", False)
-            
-            # ✅ FIRST PRINCIPLES: Explicitly add required level keyword to initial condition
-            # This ensures u(x,0) is explicit, not assumed
-            if needs_modification and level_keywords:
-                query_lower = query.lower()
-                # Add level keyword if missing (explicit initial condition)
-                best_keyword = level_keywords[0]  # Use most specific keyword
-                
-                # Check if keyword is already present (double-check)
-                if best_keyword.lower() not in query_lower:
-                    # Strategy 1: Insert after "what" or "which" if present (more natural)
-                    pattern = r'\b(what|which)\s+([a-z]+)\s+'
-                    match = re.search(pattern, query_lower)
-                    if match:
-                        pos = match.end()
-                        query = query[:pos] + f"{best_keyword} " + query[pos:]
-                        logger.info(
-                            f"GranularityRegulator (u(x,0)): Added level keyword '{best_keyword}' "
-                            f"to query (domain={required_domain}, level={required_level})"
-                        )
-                    else:
-                        # Strategy 2: Prepend for visibility (ensures it's in the query)
-                        query = f"{best_keyword} {query}"
-                        logger.info(
-                            f"GranularityRegulator (u(x,0)): Prepended level keyword '{best_keyword}' "
-                            f"to query (domain={required_domain}, level={required_level})"
-                        )
-                else:
-                    logger.debug(
-                        f"GranularityRegulator: Level keyword '{best_keyword}' already present in query"
-                    )
+            # ✅ FIX: Don't inject keywords - granularity is a soft constraint
+            # The requirement is tracked in the constraint parameters for downstream scoring
+            logger.debug(
+                f"GranularityRegulator constraint applied: domain={required_domain}, "
+                f"level={required_level} (tracked for scoring, not injected into query)"
+            )
+            # Query remains unchanged - granularity will be applied as penalty downstream
         
         # Plan Regulator: Boundary condition (goal alignment)
         elif constraint_type == "boundary":

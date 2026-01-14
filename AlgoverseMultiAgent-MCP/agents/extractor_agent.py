@@ -8,6 +8,14 @@ import re
 
 logger = logging.getLogger(__name__)
 
+# ✅ FIX #1: Location pattern for detecting implicit location cues
+# Pattern matches: "in/from/at/near [City], [Country]" (case-sensitive for proper nouns)
+LOCATION_PATTERN = re.compile(
+    r"\b(in|from|at|near)\s+"
+    r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,"
+    r"\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?"
+)
+
 class DocumentChunk(BaseModel):
     """Represents a chunk of text from a document with metadata."""
     text: str = Field(..., description="The text content of the chunk")
@@ -394,15 +402,36 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
                     }]
                     result["extracted_passages"] = passages
 
-                # Location/HQ-specific fallback: if query is location/HQ and no passage has a location cue, keep top-1 doc
+                # ✅ FIX #1: Location/HQ-specific fallback with improved location cue detection
                 is_location_q = any(
                     kw in query.lower()
                     for kw in ["headquarter", "headquarters", "hq", "located", "location", "based in", "where", "city"]
                 )
-                def _has_location_cue(p):
-                    txt = (p.get("text") or "").lower()
-                    cues = ["headquarter", "hq", "located", "location", "based in", "city", "state", "country"]
-                    return any(c in txt for c in cues)
+                
+                def _has_location_cue(passage_or_text) -> bool:
+                    """Check if passage contains location cues (keywords or patterns)."""
+                    if isinstance(passage_or_text, dict):
+                        text = (passage_or_text.get("text") or "")
+                    else:
+                        text = str(passage_or_text)
+                    
+                    lower = text.lower()
+                    
+                    # Fast path: explicit keyword cues
+                    cues = [
+                        "headquarter", "hq", "located", "location",
+                        "based in", "city", "state", "country"
+                    ]
+                    
+                    if any(cue in lower for cue in cues):
+                        return True
+                    
+                    # Pattern-based detection (case-sensitive for proper nouns)
+                    if LOCATION_PATTERN.search(text):
+                        return True
+                    
+                    return False
+                
                 passages = result.get("extracted_passages", []) or []
                 if is_location_q and not any(_has_location_cue(p) for p in passages) and documents:
                     doc0 = documents[0]
@@ -427,6 +456,10 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
                 
                 # Validate and filter extracted passages
                 valid_passages = []
+                # ✅ FIX 1: Track best passage even if below min_relevance (information preservation)
+                best_passage = None
+                best_relevance = 0.0
+                
                 for i, passage in enumerate(result["extracted_passages"]):
                     try:
                         if not all(k in passage for k in ["text", "document_id", "relevance"]):
@@ -435,16 +468,23 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
                             
                         # Ensure relevance is a float between 0 and 1
                         relevance = float(passage.get("relevance", 0.0))
-                        if relevance < min_relevance:
-                            #Added logging in the validationloop (after line 277)
-                            logger.debug(f"Passage {i} filtered: relevance {relevance} < min_relevance {min_relevance}")
-                            continue
-                            
+                        
                         # Clean and validate the extracted text
                         text = passage["text"].strip()
                         if len(text) < 10:  # Skip very short extractions
                             #DEBUG: check for text length filtering
                             logger.debug(f"Passage {i} filtered: text too short ({len(text)} chars < 10)")
+                            continue
+                        
+                        # Track best passage even if below threshold
+                        if relevance > best_relevance:
+                            best_relevance = relevance
+                            best_passage = passage
+                        
+                        # Only add to valid_passages if meets min_relevance threshold
+                        if relevance < min_relevance:
+                            #Added logging in the validationloop (after line 277)
+                            logger.debug(f"Passage {i} below threshold: relevance {relevance} < min_relevance {min_relevance} (tracking as best)")
                             continue
                             
                         valid_passages.append({
@@ -459,6 +499,24 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
                     except (ValueError, TypeError) as e:
                         logger.warning(f"Error processing passage {i}: {str(e)}")
                         continue
+                
+                # ✅ FIX 1: If no valid passages but we have a best passage, keep it with low_evidence tag
+                if not valid_passages and best_passage and documents:
+                    logger.info(
+                        f"No passages met min_relevance ({min_relevance}), but keeping best passage "
+                        f"(relevance: {best_relevance:.3f}) with low_evidence tag for downstream evaluation"
+                    )
+                    text = best_passage["text"].strip()
+                    if len(text) >= 10:  # Only if text is long enough
+                        valid_passages.append({
+                            "text": text,
+                            "document_id": str(best_passage["document_id"]),
+                            "chunk_id": str(best_passage.get("chunk_id", "")),
+                            "relevance": max(best_relevance, 0.1),  # Floor at 0.1 to prevent zero confidence
+                            "reasoning": f"Best available passage (relevance: {best_relevance:.3f}, below threshold {min_relevance})",
+                            "source_context": str(best_passage.get("source_context", "")).strip(),
+                            "low_evidence": True  # Tag for downstream handling
+                        })
                 
                 # Sort passages by relevance (highest first)
                 valid_passages.sort(key=lambda x: x["relevance"], reverse=True)

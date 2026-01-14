@@ -41,19 +41,20 @@ class EvidenceRegulator(BaseRegulator):
             reasoning_state
         )
         
-        # ✅ FIRST PRINCIPLES FIX: Filter evidence terms by hierarchical level
-        # If plan_goal requires a specific hierarchical level, don't add terms
-        # that contain hierarchical level keywords from wrong level (prevents bias)
-        filtered_terms = self._filter_by_hierarchical_level(
+        # ✅ FIX: Annotate instead of filter
+        annotated_terms = self._annotate_by_hierarchical_level(
             evidence_terms,
             plan_goal,
             proposed_query
         )
         
+        # Extract term strings for backward compatibility
+        term_strings = [ann["term"] for ann in annotated_terms]
+        
         # Calculate evidence strength (how well query aligns with evidence)
         evidence_alignment = self._calculate_evidence_alignment(
             proposed_query,
-            filtered_terms
+            term_strings
         )
         
         # Weight based on evidence strength
@@ -64,11 +65,12 @@ class EvidenceRegulator(BaseRegulator):
             constraint_type="potential_well",
             weight=weight,
             parameters={
-                "evidence_terms": filtered_terms,  # Use filtered terms
-                "top_terms": filtered_terms[:5],  # Top 5 terms
+                "evidence_terms": term_strings,  # For backward compatibility
+                "annotated_terms": annotated_terms,  # NEW: Full annotations
+                "top_terms": term_strings[:5],
                 "evidence_alignment": evidence_alignment,
-                "term_count": len(filtered_terms),
-                "original_terms": evidence_terms  # Keep original for debugging
+                "term_count": len(term_strings),
+                "original_terms": evidence_terms
             }
         )
     
@@ -202,29 +204,16 @@ class EvidenceRegulator(BaseRegulator):
         
         return alignment
     
-    def _filter_by_hierarchical_level(
+    def _annotate_by_hierarchical_level(
         self,
         evidence_terms: List[str],
         plan_goal: Optional[str],
         proposed_query: str
-    ) -> List[str]:
+    ) -> List[Dict[str, Any]]:
         """
-        Filter evidence terms to respect hierarchical level requirements.
+        Annotate evidence terms with granularity metadata instead of filtering.
         
-        ✅ GENERALIZED: Uses GranularityRegulator's hierarchical level system
-        instead of hardcoded location terms. Works for any hierarchical domain
-        (territorial, organizational, taxonomic, etc.).
-        
-        If a term violates the required hierarchical level, extracts the
-        parent-level term name to help retrieval while respecting constraints.
-        
-        Args:
-            evidence_terms: List of evidence terms to filter
-            plan_goal: Overall plan goal/question (used to infer required level)
-            proposed_query: Proposed query (for context)
-            
-        Returns:
-            Filtered list of evidence terms that respect hierarchical constraints
+        ✅ FIX: Preserves all evidence terms, adds granularity_delta annotation.
         """
         if not evidence_terms:
             return []
@@ -237,62 +226,34 @@ class EvidenceRegulator(BaseRegulator):
             logger.debug("EvidenceRegulator: All evidence terms filtered as invalid")
             return []
         
-        if not plan_goal:
-            return valid_terms  # No hierarchical constraint, but still filter invalid terms
-        
-        # Use GranularityRegulator to infer required level (generalized, not hardcoded)
+        # Use GranularityRegulator to infer required level
         granularity_reg = GranularityRegulator()
         required_domain, required_level = granularity_reg._infer_required_level(plan_goal)
         
-        if not required_domain or not required_level:
-            return valid_terms  # No hierarchical constraint detected
-        
-        # Filter evidence terms based on hierarchical level requirement
-        filtered = []
+        annotated_terms = []
         for term in valid_terms:
-            # Classify term's hierarchical level using GranularityRegulator
-            term_domain, term_level, _ = granularity_reg.classify_entity_level(term)
-            
-            # ✅ FIX: If term can't be classified (no level keywords), allow it through
-            # It might be the correct answer (e.g., "Tamaulipas" without "state" keyword)
-            # OR it might be in previous answers and needs to be reinforced for retrieval
-            if not term_domain or not term_level:
-                filtered.append(term)
-                logger.debug(
-                    f"EvidenceRegulator: Allowing unclassified term '{term}' through "
-                    f"(no level keywords found - might be correct answer or needs reinforcement)"
-                )
-                continue
-            
-            # Check if term violates required level
-            is_violation = granularity_reg.is_level_violation(
-                required_domain, required_level,
-                term_domain, term_level
-            )
-            
-            if is_violation:
-                # Try to extract parent-level term name (generalized extraction)
-                parent_name = granularity_reg.extract_parent_level_name(
+            # Compute granularity metadata
+            if required_domain and required_level:
+                granularity_metadata = granularity_reg.compute_granularity_metadata(
                     term, required_domain, required_level
                 )
-                
-                if parent_name:
-                    filtered.append(parent_name)
-                    logger.debug(
-                        f"EvidenceRegulator: Extracted parent-level term '{parent_name}' from '{term}' "
-                        f"(required: {required_domain}/{required_level}, term: {term_domain}/{term_level}) "
-                        f"to help retrieval while respecting hierarchical constraint"
-                    )
-                else:
-                    logger.debug(
-                        f"EvidenceRegulator: Skipping evidence term '{term}' "
-                        f"(violates required level {required_domain}/{required_level}, "
-                        f"could not extract parent-level name)"
-                    )
-                continue
+            else:
+                granularity_metadata = {
+                    "granularity_delta": None,
+                    "granularity_violation": False,
+                    "is_unclassified": True,
+                    "penalty_factor": 0.0
+                }
             
-            # Term respects hierarchical constraint
-            filtered.append(term)
+            annotated_terms.append({
+                "term": term,
+                "granularity_metadata": granularity_metadata
+            })
+            
+            logger.debug(
+                f"EvidenceRegulator: Annotated term '{term}': "
+                f"delta={granularity_metadata.get('granularity_delta')}, "
+                f"violation={granularity_metadata.get('granularity_violation')}"
+            )
         
-        # Fallback to original if all filtered (better than no terms)
-        return filtered if filtered else valid_terms
+        return annotated_terms

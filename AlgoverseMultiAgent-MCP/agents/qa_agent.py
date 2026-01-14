@@ -90,6 +90,55 @@ Return JSON:
   "evidence_term": "partner"  // Optional: the term actually used in evidence
 }"""
 
+    def _extract_answer_from_evidence(
+        self,
+        question: str,
+        passage_text: str,
+        all_passages: List[Dict[str, Any]]
+    ) -> Optional[str]:
+        """
+        Extract answer from evidence when QA said "unknown" but evidence exists.
+        
+        Uses simple pattern matching to extract entities/locations from passages.
+        This is a fallback when the LLM hesitates despite having valid evidence.
+        """
+        import re
+        
+        question_lower = question.lower()
+        location_keywords = ["headquarter", "headquarters", "hq", "based", "located", "location", "where", "city", "country", "province", "state"]
+        is_location_q = any(kw in question_lower for kw in location_keywords)
+        
+        if is_location_q:
+            pattern1 = r'\b(?:in|from|at)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)(?:,\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*))?'
+            matches = re.findall(pattern1, passage_text)
+            if matches:
+                for match in matches:
+                    if match[1]:
+                        return f"{match[0]}, {match[1]}"
+                    elif match[0]:
+                        return match[0]
+            pattern2 = r'(?:operated|run|controlled|managed)\s+(?:from|in)\s+[^,]+(?:,\s*)?in\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)'
+            matches = re.findall(pattern2, passage_text)
+            if matches:
+                return matches[0]
+        
+        capitalized = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', passage_text)
+        exclude_words = {"The", "A", "An", "This", "That", "Yes", "No", "Unknown", "Question", "Answer", "Evidence", "Source", "Document"}
+        question_words = set(re.findall(r'\b([A-Z][a-z]+)\b', question))
+        exclude_words.update(question_words)
+        
+        for entity in capitalized:
+            entity_words = entity.split()
+            if not all(word in exclude_words for word in entity_words):
+                if len(entity_words) >= 2 or len(entity) > 6:
+                    return entity
+        
+        for entity in capitalized:
+            if len(entity) > 4 and entity not in exclude_words:
+                return entity
+        
+        return None
+
     def _infer_slot(self, question: str, step_context: Optional[Dict[str, Any]] = None) -> str:
         """
         Infer semantic slot from question/step context.
@@ -398,6 +447,86 @@ Return JSON:
                 
                 # Update sources list based on actual evidence
                 answer.sources = list(set(e.source for e in answer.supporting_evidence))
+                
+                # ✅ FIX 1: Disallow "unknown" when valid extracted evidence exists
+                # This enforces the invariant: "if evidence exists, use it"
+                # Prevents semantic hesitation from causing information loss
+                if answer.answer.lower().strip() == "unknown":
+                    # Two-tier relevance threshold
+                    STRONG_EVIDENCE_THRESHOLD = 0.30
+                    WEAK_EVIDENCE_THRESHOLD = 0.20
+                    
+                    # Separate strong and weak evidence
+                    strong_evidence = [
+                        c for c in context 
+                        if isinstance(c, dict) 
+                        and isinstance(c.get("relevance"), (int, float))
+                        and float(c.get("relevance", 0.0)) >= STRONG_EVIDENCE_THRESHOLD
+                        and c.get("text", "").strip()
+                    ]
+                    
+                    weak_evidence = [
+                        c for c in context 
+                        if isinstance(c, dict) 
+                        and isinstance(c.get("relevance"), (int, float))
+                        and float(c.get("relevance", 0.0)) >= WEAK_EVIDENCE_THRESHOLD
+                        and float(c.get("relevance", 0.0)) < STRONG_EVIDENCE_THRESHOLD
+                        and c.get("text", "").strip()
+                    ]
+                    
+                    # Prefer strong evidence, fall back to weak
+                    valid_evidence = strong_evidence if strong_evidence else weak_evidence
+                    evidence_tier = "strong" if strong_evidence else "weak"
+                    
+                    if valid_evidence:
+                        # Force extraction from evidence instead of "unknown"
+                        best_passage = max(valid_evidence, key=lambda x: float(x.get("relevance", 0.0)))
+                        best_text = best_passage.get("text", "").strip()
+                        best_relevance = float(best_passage.get("relevance", 0.0))
+                        
+                        extracted_answer = self._extract_answer_from_evidence(
+                            question=question,
+                            passage_text=best_text,
+                            all_passages=valid_evidence
+                        )
+                        
+                        # ✅ Guard: Only override if extraction returns valid, non-generic answer
+                        invalid_answers = {"unknown", "n/a", "na", "none", "", "the", "a", "an"}
+                        extracted_lower = extracted_answer.lower().strip() if extracted_answer else ""
+                        is_valid_extraction = (
+                            extracted_answer 
+                            and extracted_lower not in invalid_answers
+                            and len(extracted_lower) > 2  # Must be substantial
+                        )
+                        
+                        # For weak evidence, require clean extraction success
+                        if evidence_tier == "weak" and not is_valid_extraction:
+                            logger.debug(
+                                f"[QA] Weak evidence (relevance: {best_relevance:.3f}) but extraction failed or invalid, "
+                                f"keeping original 'unknown' answer"
+                            )
+                        elif is_valid_extraction:
+                            logger.info(
+                                f"[QA] Blocked 'unknown' answer: {len(valid_evidence)} {evidence_tier} passages exist "
+                                f"(best relevance: {best_relevance:.3f}), extracted '{extracted_answer}' from evidence"
+                            )
+                            answer.answer = extracted_answer
+                            # Update confidence based on evidence quality and tier
+                            confidence_boost = best_relevance if evidence_tier == "strong" else min(0.6, best_relevance)
+                            answer.confidence = max(answer.confidence, confidence_boost)
+                            answer.reasoning = (
+                                f"Extracted from {evidence_tier} evidence (relevance: {best_relevance:.3f}). "
+                                f"Original reasoning: {answer.reasoning}"
+                            )
+                            # Update supporting evidence to include the best passage
+                            if not any(e.text == best_text for e in answer.supporting_evidence):
+                                answer.supporting_evidence.append(
+                                    Evidence(
+                                        text=best_text,
+                                        source=str(best_passage.get("document_id", "unknown")),
+                                        relevance=best_relevance
+                                    )
+                                )
                 
                 # ✅ REMOVED: Dangerous rewriting of "unknown" to extracted entity
                 # This breaks separation of concerns: QA compresses, Manager tracks, Gate commits

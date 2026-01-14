@@ -77,19 +77,8 @@ async def stabilize_and_retrieve(
             except Exception:
                 fallback_k = 5
             rq = proposed_query
-            try:
-                try:
-                    from agents.regulators.granularity_regulator import GranularityRegulator
-                except ImportError:
-                    from ..regulators.granularity_regulator import GranularityRegulator
-                req_domain, req_level, keywords = GranularityRegulator.infer_required(plan_goal, proposed_query)
-                if keywords:
-                    kw = keywords[0]
-                    if rq and kw.lower() not in rq.lower():
-                        rq = f"{kw} {rq}".strip()
-                        rq = " ".join(rq.split())
-            except Exception:
-                pass
+            # ✅ FIX: No keyword injection - preserve original query
+            # Granularity will be applied as soft constraint downstream
             result = await retriever_agent.process({"query": rq, "k": fallback_k, "min_similarity": 0.0})
             docs = result.metadata.get("documents", []) or []
             if not docs:
@@ -178,14 +167,8 @@ async def stabilize_and_retrieve(
         )
     except Exception:
         has_granularity = False
-    granularity_injected = False
-    # Ensure query carries the level keyword (idempotent)
-    if req_domain and req_level and keywords:
-        kw = keywords[0]
-        if stabilized_query and kw.lower() not in stabilized_query.lower():
-            stabilized_query = f"{kw} {stabilized_query}".strip()
-            stabilized_query = " ".join(stabilized_query.split())
-            granularity_injected = True
+    granularity_injected = False  # No longer injecting keywords
+    # ✅ FIX: Store granularity requirement for downstream scoring, don't inject into query
     if (not req_domain or not req_level) and flow_snapshot and hasattr(flow_snapshot, "__dict__"):
         try:
             req_domain = getattr(flow_snapshot, "required_domain", None) or getattr(flow_snapshot, "granularity_domain", None) or req_domain
@@ -202,11 +185,12 @@ async def stabilize_and_retrieve(
                 "required_level": req_level
             }
         })
-        granularity_injected = True or granularity_injected
+        # ✅ FIX: Track granularity requirement but don't inject keywords
         if flow_snapshot and hasattr(flow_snapshot, "__dict__"):
             try:
-                flow_snapshot.granularity_injected = True
-                flow_snapshot.granularity_level = req_level
+                flow_snapshot.required_domain = req_domain
+                flow_snapshot.required_level = req_level
+                flow_snapshot.granularity_injected = False  # Changed: no injection
             except Exception:
                 pass
 
@@ -459,24 +443,12 @@ async def _entropy_aware_retrieve(
     result = await retriever_agent.process(retrieval_input)
     docs = result.metadata.get("documents", []) or []
 
-    # ✅ CONTROL-LAYER FIX: If retrieval returns 0 documents, force exploration + explicit granularity and retry once.
+    # ✅ CONTROL-LAYER FIX: If retrieval returns 0 documents, force exploration and retry once.
     # This bypasses entropy-based shutdown and prevents k=0 retrieval collapse.
+    # ✅ FIX: No keyword injection on retry - preserve original query
     if len(docs) == 0:
         stabilized_query_retry = stabilized_query
-        try:
-            try:
-                from agents.regulators.granularity_regulator import GranularityRegulator
-            except ImportError:
-                from ..regulators.granularity_regulator import GranularityRegulator
-
-            granularity_reg = GranularityRegulator()
-            req_domain, req_level, keywords = GranularityRegulator.infer_required(plan_goal, stabilized_query)
-            if req_domain and req_level and keywords:
-                kw = keywords[0]
-                if kw.lower() not in stabilized_query.lower():
-                    stabilized_query_retry = f"{kw} {stabilized_query}".strip()
-        except Exception:
-            stabilized_query_retry = stabilized_query
+        # Granularity will be applied as soft constraint downstream, not via query injection
 
         retry_input = dict(retrieval_input)
         retry_input["query"] = stabilized_query_retry
@@ -500,31 +472,19 @@ async def _entropy_aware_retrieve(
         result = await retriever_agent.process(retry_input)
         docs = result.metadata.get("documents", []) or []
         stabilized_query = stabilized_query_retry
-        # Mark granularity injection on retry path
+        # ✅ FIX: No granularity injection on retry - track requirement only
         try:
             result_metadata = result.metadata
-            result_metadata["granularity_injected_retry"] = True
+            result_metadata["granularity_injected_retry"] = False  # Changed: no injection
             result_metadata["granularity_level_retry"] = req_level if req_level else None
         except Exception:
             pass
     
     # ✅ CONTROL-LAYER FIX: If still no docs after one retry, perform a low-sim fallback with stripped constraints.
+    # ✅ FIX: No keyword injection in fallback - preserve original query
     if len(docs) == 0:
         fallback_query = stabilized_query
-        fallback_keywords = []
-        try:
-            try:
-                from agents.regulators.granularity_regulator import GranularityRegulator
-            except ImportError:
-                from ..regulators.granularity_regulator import GranularityRegulator
-            fallback_req_domain, fallback_req_level, fallback_keywords = GranularityRegulator.infer_required(plan_goal, stabilized_query)
-            if fallback_req_domain and fallback_req_level and fallback_keywords:
-                kw = fallback_keywords[0]
-                if kw.lower() not in fallback_query.lower():
-                    fallback_query = f"{kw} {fallback_query}".strip()
-                    fallback_query = " ".join(fallback_query.split())
-        except Exception:
-            fallback_query = stabilized_query
+        # Granularity will be applied as soft constraint downstream, not via query injection
 
         fallback_input = dict(retrieval_input)
         fallback_input.update({

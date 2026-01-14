@@ -407,10 +407,19 @@ class GranularityRegulator(BaseRegulator):
         
         best_level = domain_scores[best_domain]["level"]
 
-        # Guard: if question clearly mentions a city/municipality, avoid forcing state/province
+        
+
+        # ✅ FIX: Context-aware guard - only downgrade if question explicitly asks for municipality-level answer
+        # Check if municipality/city keywords appear in answer type position (after "what"/"which")
         if best_domain == "territorial" and best_level == "state_province":
-            if "city" in question_lower or "ciudad" in question_lower:
+            # Check if municipality-level keywords appear as answer type (not just mentioned in context)
+            # Answer type position: immediately after "what" or "which"
+            answer_type_pattern = r'\b(what|which)\s+(city|municipality|ciudad|town|county|district)\b'
+            if re.search(answer_type_pattern, question_lower):
                 best_level = "municipality"
+                logger.debug(
+                    f"GranularityRegulator: Downgraded to municipality (question asks for municipality-level answer)"
+                )
         
         result = (best_domain, best_level)
         
@@ -489,8 +498,8 @@ class GranularityRegulator(BaseRegulator):
         """
         Check if an entity's hierarchical level violates the required level.
         
-        Uses hierarchical level comparison (coarse vs fine) instead of
-        hardcoded keyword matching. Works for any hierarchical domain.
+        ✅ FIX #2: Uses monotonic logic (consistent with _check_monotonic_consistency).
+        Allows coarse→fine (e.g., state → city) but forbids fine→coarse (e.g., city → state).
         
         Args:
             required_domain: Required hierarchical domain
@@ -499,7 +508,7 @@ class GranularityRegulator(BaseRegulator):
             entity_level: Entity's hierarchical level name
             
         Returns:
-            True if entity violates required level (wrong domain or wrong level), False otherwise
+            True if entity violates required level (wrong domain or too coarse), False otherwise
         """
         if not required_domain or not required_level:
             return False  # No constraint
@@ -507,29 +516,275 @@ class GranularityRegulator(BaseRegulator):
         if not entity_domain or not entity_level:
             return False  # Can't determine entity level
         
-        # Different domains = violation (e.g., territorial vs organizational)
+        # ✅ FIX #6: Cross-domain is a violation (different hierarchies)
         if entity_domain != required_domain:
-            return False  # Not a violation if different domain (might be unrelated)
+            return True  # Violation: different domain
         
-        # Same domain: compare levels
+        # Same domain: compare levels using monotonic logic
         required_level_num = self.get_level_number(required_domain, required_level)
         entity_level_num = self.get_level_number(entity_domain, entity_level)
         
         if required_level_num is None or entity_level_num is None:
             return False  # Can't compare
         
-        # Violation: entity is at a different level than required
-        # (We allow same level or parent level, but not child level)
-        return entity_level_num != required_level_num
+        # ✅ FIX #2: Violation only if entity is coarser than required (fine→coarse forbidden)
+        # Allows: coarse→fine (e.g., state level 2 → city level 3) ✅
+        # Forbids: fine→coarse (e.g., city level 3 → state level 2) ❌
+        return entity_level_num < required_level_num
 
     # Public helper to avoid reaching into private methods externally
     @staticmethod
     def infer_required(plan_goal: Optional[str], query: Optional[str]) -> Tuple[Optional[str], Optional[str], List[str]]:
+        """
+        Infer required granularity with priority: question target > plan goal.
+        
+        Priority order:
+        1. Explicit answer type in question (WH-target)
+        2. Role words in question
+        3. Plan goal text
+        """
         reg = GranularityRegulator()
-        domain, level = reg._infer_required_level(plan_goal or query or "")
-        keywords = reg._get_level_keywords(domain, level) if domain and level else []
-        return domain, level, keywords
+        
+        # ✅ FIX 1: Try question first (answer type priority)
+        if query:
+            # Extract answer type from WH-questions
+            answer_type = reg._extract_answer_type_from_question(query)
+            if answer_type:
+                domain, level = reg._infer_required_level(query)
+                # If we found explicit answer type, use it
+                if level == answer_type:
+                    keywords = reg._get_level_keywords(domain, level) if domain and level else []
+                    return domain, level, keywords
+        
+        # Try question without answer type extraction
+        if query:
+            domain, level = reg._infer_required_level(query)
+            if domain and level:
+                keywords = reg._get_level_keywords(domain, level) if domain and level else []
+                return domain, level, keywords
+        
+        # Fallback to plan goal
+        if plan_goal:
+            domain, level = reg._infer_required_level(plan_goal)
+            keywords = reg._get_level_keywords(domain, level) if domain and level else []
+            return domain, level, keywords
+        
+        return None, None, []
     
+    def _extract_answer_type_from_question(self, question: str) -> Optional[str]:
+        """
+        Extract explicit answer type from WH-questions.
+        
+        Examples:
+        - "What province is X located in?" → "state_province"
+        - "What city is X in?" → "municipality"
+        - "What company owns X?" → "company"
+        """
+        if not question:
+            return None
+        
+        q_lower = question.lower()
+        
+        # Pattern: "What [ANSWER_TYPE] is/does/..."
+        answer_type_patterns = {
+            "province": "state_province",
+            "state": "state_province",
+            "city": "municipality",
+            "municipality": "municipality",
+            "district": "municipality",  # District is municipality-level
+            "country": "country",
+            "company": "company",
+            "corporation": "company",
+            "organization": "company",
+        }
+        
+        for keyword, level in answer_type_patterns.items():
+            # Check for "What [keyword]" or "Which [keyword]" pattern
+            if f"what {keyword}" in q_lower or f"which {keyword}" in q_lower:
+                return level
+        
+        return None
+    
+    # ✅ FIX: Build granularity prior from query only (no candidate feedback loop)
+    @staticmethod
+    def build_granularity_posterior(
+        candidates: List[Dict[str, Any]], 
+        query: str,
+        gran_regulator: Optional['GranularityRegulator'] = None
+    ) -> Optional[Dict[str, float]]:
+        """
+        Build granularity prior distribution from question only (not from candidates).
+        
+        This prevents circular dependency where candidate confidences update the posterior,
+        which then penalizes those same candidates. The prior is fixed based on what the
+        question asks for, independent of candidate answers.
+        
+        Args:
+            candidates: List of candidate dicts (unused, kept for API compatibility)
+            query: Original query/question
+            gran_regulator: GranularityRegulator instance (creates one if None)
+            
+        Returns:
+            Dict[str, float]: Prior probability for each level (normalized), or None if unavailable
+        """
+        if gran_regulator is None:
+            gran_regulator = GranularityRegulator()
+        
+        # Initialize prior distribution
+        prior = {}
+        all_levels = set()
+        
+        # Collect all possible levels from the regulator
+        for domain, levels in gran_regulator.HIERARCHICAL_LEVELS.items():
+            for level_name in levels.keys():
+                all_levels.add(level_name)
+                prior[level_name] = 0.0
+        
+        # Build prior based on query/question only (not from candidates)
+        try:
+            prior_domain, prior_level = gran_regulator._infer_required_level(query)
+            if prior_level:
+                # Give inferred level a boost (but not too strong to allow exploration)
+                prior[prior_level] = 0.4
+                # Distribute remaining probability uniformly across other levels
+                remaining = 0.6 / max(1, len(all_levels) - 1)
+                for level in all_levels:
+                    if level != prior_level:
+                        prior[level] = remaining
+            else:
+                # Uniform prior if no level can be inferred from query
+                uniform = 1.0 / max(1, len(all_levels))
+                for level in all_levels:
+                    prior[level] = uniform
+        except Exception:
+            # Uniform prior on error
+            uniform = 1.0 / max(1, len(all_levels))
+            for level in all_levels:
+                prior[level] = uniform
+        
+        # ✅ FIX: No candidate-based updates - prior is fixed from query only
+        # This breaks the circular dependency where candidates update posterior,
+        # which then penalizes those same candidates
+        
+        # Final normalization check (defensive)
+        total = sum(prior.values())
+        if abs(total - 1.0) > 0.001:  # Allow small floating point errors
+            logger.warning(f"[GranularityPrior] Prior not normalized (sum={total:.3f}), normalizing")
+            if total > 0:
+                for level in prior:
+                    prior[level] /= total
+            else:
+                uniform = 1.0 / max(1, len(all_levels))
+                for level in all_levels:
+                    prior[level] = uniform
+        
+        return prior
+    
+    def compute_granularity_delta(
+        self,
+        required_domain: Optional[str],
+        required_level: Optional[str],
+        entity_domain: Optional[str],
+        entity_level: Optional[str]
+    ) -> Optional[int]:
+        """
+        Compute granularity delta: entity_level_num - required_level_num
+        
+        Returns:
+            - Positive: entity is finer than required (e.g., city when state required)
+            - Zero: exact match
+            - Negative: entity is coarser than required (e.g., country when city required)
+            - None: unclassified or can't compare
+        """
+        if not required_domain or not required_level:
+            return None
+        
+        if not entity_domain or not entity_level:
+            return None  # Unclassified
+        
+        if entity_domain != required_domain:
+            return None  # Cross-domain, can't compare numerically
+        
+        required_level_num = self.get_level_number(required_domain, required_level)
+        entity_level_num = self.get_level_number(entity_domain, entity_level)
+        
+        if required_level_num is None or entity_level_num is None:
+            return None
+        
+        return entity_level_num - required_level_num
+
+    def compute_granularity_metadata(
+        self,
+        entity_text: str,
+        required_domain: Optional[str],
+        required_level: Optional[str]
+    ) -> Dict[str, Any]:
+        """
+        Compute complete granularity metadata for an entity.
+        
+        Returns:
+            {
+                "granularity_delta": int | None,
+                "granularity_violation": bool,
+                "entity_domain": str | None,
+                "entity_level": str | None,
+                "entity_level_num": int | None,
+                "required_domain": str | None,
+                "required_level": str | None,
+                "required_level_num": int | None,
+                "is_unclassified": bool,
+                "is_cross_domain": bool,
+                "penalty_factor": float  # Suggested penalty (0.0 to 0.5)
+            }
+        """
+        entity_domain, entity_level, entity_level_num = self.classify_entity_level(entity_text)
+        required_level_num = self.get_level_number(required_domain, required_level) if required_domain and required_level else None
+        
+        granularity_delta = self.compute_granularity_delta(
+            required_domain, required_level,
+            entity_domain, entity_level
+        )
+        
+        is_violation = self.is_level_violation(
+            required_domain, required_level,
+            entity_domain, entity_level
+        )
+        
+        is_unclassified = not entity_domain or not entity_level
+        is_cross_domain = (entity_domain and required_domain and 
+                          entity_domain != required_domain)
+        
+        # Compute suggested penalty factor
+        penalty_factor = 0.0
+        if is_violation:
+            if granularity_delta is not None:
+                # Stronger penalty for coarser (negative delta)
+                if granularity_delta < 0:
+                    penalty_factor = min(0.3, abs(granularity_delta) * 0.1)
+                else:
+                    penalty_factor = min(0.15, granularity_delta * 0.05)
+            else:
+                penalty_factor = 0.15  # Default violation penalty
+        elif is_unclassified:
+            # Moderate penalty for unclassified when level is required
+            penalty_factor = 0.15 if required_level else 0.05
+        elif is_cross_domain:
+            penalty_factor = 0.2
+        
+        return {
+            "granularity_delta": granularity_delta,
+            "granularity_violation": is_violation,
+            "entity_domain": entity_domain,
+            "entity_level": entity_level,
+            "entity_level_num": entity_level_num,
+            "required_domain": required_domain,
+            "required_level": required_level,
+            "required_level_num": required_level_num,
+            "is_unclassified": is_unclassified,
+            "is_cross_domain": is_cross_domain,
+            "penalty_factor": penalty_factor
+        }
+
     def extract_parent_level_name(self, 
                                   entity_text: str,
                                   required_domain: Optional[str],

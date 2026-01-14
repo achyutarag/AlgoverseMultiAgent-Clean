@@ -1,4 +1,4 @@
-from typing import Dict, Any, List, Optional, Union
+from typing import Dict, Any, List, Optional, Union, Set
 from pydantic import BaseModel, Field
 import json
 import logging
@@ -96,6 +96,14 @@ class MARAGOrchestrator:
         self.start_time: Optional[datetime] = None
         self.token_usage: Dict[str, int] = {"prompt_tokens": 0, "generated_tokens": 0, "total_tokens": 0}
         
+        # ✅ LAYER 2: Track all candidates across steps (for analysis only, not prior building)
+        self._all_candidates: List[Dict[str, Any]] = []
+        self._granularity_prior: Optional[Dict[str, float]] = None  # Renamed from _granularity_posterior
+        # ✅ FIX #1, #4, #5, #8: Store granularity once from original question
+        self._original_query: Optional[str] = None
+        self._required_domain: Optional[str] = None
+        self._required_level: Optional[str] = None
+        
         logger.info("MA-RAG Orchestrator initialized with all components")
     
     def _extract_and_aggregate_token_usage(self, agent_response: Any) -> None:
@@ -140,6 +148,224 @@ class MARAGOrchestrator:
             "epistemic_support_low": epistemic_support_low,
         }
     
+    def _compute_adaptive_extractor_limit(
+        self,
+        all_retrieved_docs: List[Dict[str, Any]],
+        flow_snapshot: Optional[Any] = None,
+        hop: int = 1
+    ) -> int:
+        """
+        Minimal adaptive document limit based on retrieval quality.
+        
+        Purpose:
+        - Expand coverage when retrieval confidence is low
+        - Stay predictable and debuggable
+        
+        Returns:
+            Limit between 15 (base) and 30 (expanded)
+        """
+        BASE_LIMIT = 15
+        EXPANDED_LIMIT = 30
+
+        if not all_retrieved_docs:
+            return BASE_LIMIT
+
+        # ------------------------------------------------------------
+        # Signal 1: Similarity quality (primary signal)
+        # ------------------------------------------------------------
+        scores = [
+            doc.get("score", 0.0)
+            for doc in all_retrieved_docs[:BASE_LIMIT]
+            if isinstance(doc.get("score"), (int, float))
+        ]
+
+        max_score = max(scores) if scores else 0.0
+        avg_score = sum(scores) / len(scores) if scores else 0.0
+
+        weak_retrieval = (
+            max_score < 0.4 or
+            avg_score < 0.35
+        )
+
+        # ------------------------------------------------------------
+        # Signal 2: Entropy (optional uncertainty hint)
+        # ------------------------------------------------------------
+        entropy = 0.0
+        if flow_snapshot:
+            try:
+                # Try multiple extraction paths
+                if hasattr(flow_snapshot, "entropy"):
+                    entropy = float(flow_snapshot.entropy)
+                elif isinstance(flow_snapshot, dict):
+                    entropy = float(flow_snapshot.get("entropy", 0.0))
+                elif hasattr(flow_snapshot, "__dict__"):
+                    entropy = float(getattr(flow_snapshot, "entropy", 0.0))
+                # Clamp to valid range
+                entropy = max(0.0, min(1.0, entropy))
+            except (ValueError, TypeError, AttributeError):
+                entropy = 0.0
+
+        high_uncertainty = entropy > 0.5
+
+        # ------------------------------------------------------------
+        # Signal 3: Multi-hop modifier
+        # ------------------------------------------------------------
+        multihop_uncertain = hop > 1 and max_score < 0.5
+
+        # ------------------------------------------------------------
+        # Expansion decision (simple OR logic)
+        # ------------------------------------------------------------
+        if weak_retrieval or high_uncertainty or multihop_uncertain:
+            logger.info(
+                f"📈 Adaptive expansion: {BASE_LIMIT} → {EXPANDED_LIMIT} "
+                f"(max_score={max_score:.3f}, avg_score={avg_score:.3f}, "
+                f"entropy={entropy:.3f}, hop={hop})"
+            )
+            return min(EXPANDED_LIMIT, len(all_retrieved_docs))
+
+        return BASE_LIMIT
+    
+    def _coverage_exhausted(
+        self,
+        slot_id: Optional[str],
+        current_step_index: Optional[int],
+        total_steps: Optional[int],
+        seen_doc_ids: Set[str],
+        all_retrieved_docs: List[Dict[str, Any]],
+        hop: int,
+        retrieval_result: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        Check if search coverage is exhausted for a given slot.
+        
+        Coverage answers: "Have we looked enough?" (not "Is the answer bad?")
+        
+        Coverage is exhausted if:
+        1. We've reached max steps in the plan
+        2. We've searched enough unique sources for this slot type
+        3. Retrieval is no longer finding new documents (semantic space explored)
+        4. Similarity degradation + novelty exhaustion (weak signal, only if coverage already broad)
+        
+        Args:
+            slot_id: Semantic slot being searched (e.g., "spouse", "founder")
+            current_step_index: Current step index (0-based)
+            total_steps: Total steps in plan
+            seen_doc_ids: Set of document IDs already retrieved
+            all_retrieved_docs: List of all retrieved documents
+            hop: Current hop number
+            retrieval_result: Last retrieval result (for similarity scores)
+            
+        Returns:
+            True if coverage is exhausted, False if more searching is useful
+        """
+        # ✅ FIX #1: Slot-aware source limits
+        SOURCE_LIMITS = {
+            "spouse": 3,      # Usually converges quickly
+            "founder": 5,     # May need more sources
+            "performer": 4,
+            "location": 5,
+            "headquarters": 5,
+            "company": 5,
+            "author": 4,
+            "parent": 3,
+            "child": 3,
+            None: 6  # fallback for unknown slots
+        }
+        slot_limit = SOURCE_LIMITS.get(slot_id, SOURCE_LIMITS[None])
+        
+        # 1) Step budget exhausted
+        # Don't mark last step as exhausted - it might be a synthesis step
+        # Only mark as exhausted if we've gone past the plan
+        if total_steps and current_step_index is not None:
+            if current_step_index >= total_steps:  # Past last step, not on it
+                logger.debug(
+                    f"[Coverage] Exhausted: past last step ({current_step_index + 1} > {total_steps}) "
+                    f"for slot '{slot_id}'"
+                )
+                return True
+        
+        # 2) Slot-aware source limit reached
+        unique_sources = len(seen_doc_ids)
+        if unique_sources >= slot_limit:
+            logger.debug(
+                f"[Coverage] Exhausted: searched {unique_sources} unique sources "
+                f"(limit={slot_limit} for slot '{slot_id}')"
+            )
+            return True
+        
+        # 3) Retrieval no longer finding new documents (semantic space explored)
+        # This is the PRIMARY coverage signal
+        if retrieval_result:
+            docs_from_last_retrieval = retrieval_result.get("documents", [])
+            if docs_from_last_retrieval:
+                new_docs_count = sum(
+                    1 for doc in docs_from_last_retrieval
+                    if (doc.get("id") or doc.get("metadata", {}).get("id")) not in seen_doc_ids
+                )
+                total_docs_retrieved = len(docs_from_last_retrieval)
+                if total_docs_retrieved > 0:
+                    new_docs_ratio = new_docs_count / total_docs_retrieved
+                    if new_docs_ratio < 0.2:  # Less than 20% new documents
+                        logger.debug(
+                            f"[Coverage] Exhausted: semantic space explored - only {new_docs_ratio:.1%} "
+                            f"new documents ({new_docs_count}/{total_docs_retrieved}) for slot '{slot_id}'"
+                        )
+                        return True
+        
+        # 4) ✅ FIX #2: Similarity degradation ONLY if novelty already exhausted
+        # This is a weak signal - only applies if we've already searched broadly
+        # and are no longer finding new documents
+        if retrieval_result and all_retrieved_docs:
+            docs_from_last = retrieval_result.get("documents", [])
+            if docs_from_last:
+                # Check novelty first (already computed above)
+                new_docs_count = sum(
+                    1 for doc in docs_from_last
+                    if (doc.get("id") or doc.get("metadata", {}).get("id")) not in seen_doc_ids
+                )
+                total_docs = len(docs_from_last)
+                new_docs_ratio = new_docs_count / total_docs if total_docs > 0 else 0.0
+                
+                # Get similarity scores
+                last_similarities = []
+                for doc in docs_from_last:
+                    score = doc.get("score") or doc.get("similarity", 0.0)
+                    if isinstance(score, (int, float)):
+                        last_similarities.append(score)
+                
+                if last_similarities:
+                    max_similarity = max(last_similarities)
+                    
+                    # ✅ FIX #2: Require BOTH novelty exhaustion AND low similarity
+                    # This prevents premature exhaustion during diffusion (weak → strong)
+                    if (
+                        max_similarity < 0.3
+                        and unique_sources >= slot_limit  # Already searched broadly
+                        and new_docs_ratio < 0.2  # AND no longer finding new docs
+                    ):
+                        logger.debug(
+                            f"[Coverage] Exhausted: low similarity ({max_similarity:.3f}) "
+                            f"+ novelty exhausted ({new_docs_ratio:.1%}) "
+                            f"after {unique_sources} sources for slot '{slot_id}'"
+                        )
+                        return True
+        
+        # 5) Hop budget (prevent infinite loops)
+        MAX_HOPS_PER_SLOT = 3  # Configurable
+        if hop > MAX_HOPS_PER_SLOT:
+            logger.debug(
+                f"[Coverage] Exhausted: exceeded max hops ({hop} > {MAX_HOPS_PER_SLOT}) "
+                f"for slot '{slot_id}'"
+            )
+            return True
+        
+        # Coverage still available
+        logger.debug(
+            f"[Coverage] Remaining: {unique_sources}/{slot_limit} sources, "
+            f"hop={hop}, slot='{slot_id}'"
+        )
+        return False
+    
     async def execute_pipeline(self, query: str, context: Optional[Dict[str, Any]] = None) -> PipelineResult:
         """
         Execute the complete MA-RAG pipeline following the paper's methodology.
@@ -157,6 +383,14 @@ class MARAGOrchestrator:
         # Reset token usage for this execution
         self.token_usage = {"prompt_tokens": 0, "generated_tokens": 0, "total_tokens": 0}
         
+        # ✅ LAYER 2: Reset candidate tracking for new pipeline execution
+        self._all_candidates = []
+        self._granularity_prior = None  # Renamed from _granularity_posterior
+        # ✅ FIX #1, #4, #5, #8: Reset granularity state
+        self._original_query = None
+        self._required_domain = None
+        self._required_level = None
+        
         # Reset protected answer manager for new query
         self.protected_answer_manager.clear()
 
@@ -165,13 +399,27 @@ class MARAGOrchestrator:
         logger.info(f"Query: {query[:100]}...")
 
         
-        # Normalize question for consistent processing
+        # ✅ FIX #1: Infer slot from ORIGINAL query (before normalization)
+        # This preserves keywords that normalization might strip (e.g., "spouse", "founder")
+        target_slot = self.qa._infer_slot(query, step_context=None)  # Use original query
+        
+        # Normalize question for other processing (but slot already inferred)
         question = tokenization_utils.normalize_query(query)
         
-        # Infer target slot ONCE per query (enforces question semantics)
-        target_slot = self.qa._infer_slot(question, step_context=None)
+        # Validate that we got a meaningful slot (not "default")
+        if target_slot == "default":
+            logger.warning(
+                f"[Orchestrator] ⚠️ Slot inference returned 'default' for query: '{query[:60]}...'. "
+                f"Normalized query: '{question[:60]}...'. This may indicate missing keywords."
+            )
+            # Try again with normalized query as fallback
+            target_slot_fallback = self.qa._infer_slot(question, step_context=None)
+            if target_slot_fallback != "default":
+                logger.info(f"[Orchestrator] Fallback inference succeeded: '{target_slot_fallback}'")
+                target_slot = target_slot_fallback
+        
         self.protected_answer_manager.set_target_slot(target_slot)
-        logger.debug(f"[Orchestrator] Inferred target_slot='{target_slot}' from query: {question[:50]}...")
+        logger.info(f"[Orchestrator] ✅ Inferred target_slot='{target_slot}' from query: '{query[:60]}...'")
         
         try:
             # Step 1: Initialize state
@@ -196,6 +444,35 @@ class MARAGOrchestrator:
                 original_plan=plan_result
             )
             logger.info("MCP reasoning state initialized")
+
+            # ✅ FIX #1, #4, #5, #8: Infer granularity once from original question
+            self._original_query = query  # Store original query
+            try:
+                from .regulators.granularity_regulator import GranularityRegulator
+                gran_reg = GranularityRegulator()
+                # Infer from original question (plan_goal as fallback context, but query is primary)
+                plan_goal = plan_result.get("disambiguated_query") or plan_result.get("query") or query
+                self._required_domain, self._required_level, _ = GranularityRegulator.infer_required(
+                    plan_goal=plan_goal,  # Use plan goal as context
+                    query=query  # But primary source is original question
+                )
+                
+                # Build granularity prior once from original question
+                self._granularity_prior = GranularityRegulator.build_granularity_posterior(
+                    candidates=[],  # Empty - prior is from question only
+                    query=query,  # Original question
+                    gran_regulator=gran_reg
+                )
+                
+                logger.info(
+                    f"[Orchestrator] ✅ Granularity inferred once: domain='{self._required_domain}', "
+                    f"level='{self._required_level}' from original query"
+                )
+            except Exception as e:
+                logger.warning(f"[Orchestrator] Failed to infer granularity: {e}")
+                self._required_domain = None
+                self._required_level = None
+                self._granularity_prior = None
 
 
             
@@ -809,8 +1086,13 @@ class MARAGOrchestrator:
                 reverse=True
             )
             
-            # Limit documents before passing to extractor (reduce load)
-            max_docs_for_extractor = min(len(all_retrieved_docs), 15)  # Cap at 15 documents
+            # ✅ ADAPTIVE COVERAGE: Expand limit based on retrieval quality
+            flow_snapshot = last_retrieval_result.get("flow_snapshot") if last_retrieval_result else None
+            max_docs_for_extractor = self._compute_adaptive_extractor_limit(
+                all_retrieved_docs=all_retrieved_docs,
+                flow_snapshot=flow_snapshot,
+                hop=hop
+            )
             limited_docs = all_retrieved_docs[:max_docs_for_extractor]
             
             logger.info(f"Step {step['id']}: Collected {len(all_retrieved_docs)} unique documents, "
@@ -916,25 +1198,25 @@ class MARAGOrchestrator:
             clean_qa = TokenizationUtils.strip_markdown_json(qa_response.content)
             qa_result = json.loads(clean_qa)
 
-            # Required granularity (computed once, used for both manager and gate)
-            required_domain = None
-            required_level = None
-            try:
-                from .regulators.granularity_regulator import GranularityRegulator
-                required_domain, required_level, _ = GranularityRegulator.infer_required(
-                    plan_goal, stabilized_query_for_qa
-                )
-            except Exception:
-                pass
+            # ✅ FIX #1, #4, #5, #8: Use pre-computed granularity (no per-step inference)
+            # Granularity was inferred once at pipeline start from original question
+            required_domain = self._required_domain
+            required_level = self._required_level
+            granularity_prior = self._granularity_prior  # Renamed from _granularity_posterior
 
             # Extract slot candidates from QA metadata
             slot_candidates = qa_response.metadata.get("slot_candidates", [])
             slot = None
             if slot_candidates:
+                # Track candidates (for debugging/analysis, not for prior building)
+                self._all_candidates.extend(slot_candidates)
+                
+                # Use pre-computed granularity prior (built once from original question)
                 self.protected_answer_manager.propose_candidates(
                     slot_candidates,
                     required_domain=required_domain,
-                    required_level=required_level
+                    required_level=required_level,
+                    granularity_posterior=granularity_prior  # Will be renamed in Group 4
                 )
                 # Extract slot from first candidate for gate
                 slot = slot_candidates[0].get("slot") if slot_candidates else None
@@ -952,6 +1234,7 @@ class MARAGOrchestrator:
                 required_domain=required_domain,
                 required_level=required_level,
                 slot=slot,
+                granularity_posterior=granularity_prior,  # Will be renamed in Group 4
             )
 
             # Add logging to see gate decisions
@@ -980,19 +1263,74 @@ class MARAGOrchestrator:
                 return step_result
 
             if decision == "needs_more_evidence":
-                step_result = {
-                    "step_id": step["id"],
-                    "step_description": step.get("description", ""),
-                    "subqueries": subqueries,
-                    "retrieved_documents": all_retrieved_docs,
-                    "extracted_passages": extracted_passages,
-                    "qa_result": qa_result,
-                    "success": False,
-                    "timestamp": datetime.now().isoformat(),
-                    "gate_decision": gate_decision,
-                    "needs_more_evidence": True,
-                }
-                return step_result
+                # ✅ Rule 3: Check if more searching is useful (coverage check)
+                coverage_exhausted = self._coverage_exhausted(
+                    slot_id=slot,
+                    current_step_index=current_step_index,
+                    total_steps=total_steps,
+                    seen_doc_ids=seen_doc_ids,
+                    all_retrieved_docs=all_retrieved_docs,
+                    hop=hop,
+                    retrieval_result=last_retrieval_result
+                )
+                
+                if coverage_exhausted:
+                    # Abstain gracefully - don't overwrite protected answers
+                    logger.info(
+                        f"[Orchestrator] Coverage exhausted for slot '{slot}' in step {step.get('id')}, "
+                        f"abstaining (do NOT overwrite protected answers)"
+                    )
+                    step_result = {
+                        "step_id": step["id"],
+                        "step_description": step.get("description", ""),
+                        "subqueries": subqueries,
+                        "retrieved_documents": all_retrieved_docs,
+                        "extracted_passages": extracted_passages,
+                        "qa_result": qa_result,
+                        "success": False,
+                        "timestamp": datetime.now().isoformat(),
+                        "gate_decision": gate_decision,
+                        "needs_more_evidence": True,
+                        "abstained": True,  # ✅ Explicit abstention
+                        "reason": "coverage_exhausted",
+                        "coverage_info": {
+                            "unique_sources": len(seen_doc_ids),
+                            "hop": hop,
+                            "current_step": current_step_index,
+                            "total_steps": total_steps,
+                            "slot": slot
+                        }
+                    }
+                    return step_result
+                else:
+                    # Coverage remaining - continue searching
+                    logger.info(
+                        f"[Orchestrator] Coverage remaining for slot '{slot}' in step {step.get('id')}, "
+                        f"continuing search"
+                    )
+                    # For now, return step_result but mark that more evidence is needed
+                    # Future: could trigger re-retrieval with different parameters
+                    step_result = {
+                        "step_id": step["id"],
+                        "step_description": step.get("description", ""),
+                        "subqueries": subqueries,
+                        "retrieved_documents": all_retrieved_docs,
+                        "extracted_passages": extracted_passages,
+                        "qa_result": qa_result,
+                        "success": False,
+                        "timestamp": datetime.now().isoformat(),
+                        "gate_decision": gate_decision,
+                        "needs_more_evidence": True,
+                        "coverage_remaining": True,  # ✅ Coverage still available
+                        "coverage_info": {
+                            "unique_sources": len(seen_doc_ids),
+                            "hop": hop,
+                            "current_step": current_step_index,
+                            "total_steps": total_steps,
+                            "slot": slot
+                        }
+                    }
+                    return step_result
 
             # Protected anchor commit (normalized, step-scoped) after accept
             qa_answer_raw = (qa_result.get("answer") or "").strip()
