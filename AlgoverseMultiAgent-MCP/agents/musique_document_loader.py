@@ -11,13 +11,14 @@ MuSiQue Structure:
 - Answers
 """
 
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from langchain.schema import Document
 from datasets import load_dataset
 import json
 import os
 import requests
 from pathlib import Path
+from .breadcrumb_extractor import BreadcrumbExtractor
 
 
 def load_musique_example_context_as_documents(
@@ -41,6 +42,15 @@ def load_musique_example_context_as_documents(
         List of Document objects from this example's context paragraphs
     """
     documents = []
+    example_id = example.get('id', 'unknown')
+    
+    # Initialize breadcrumb extractor
+    breadcrumb_extractor = BreadcrumbExtractor()
+    
+    # Track root entity and previous breadcrumbs per example (for continuity)
+    example_root_entity = None
+    previous_breadcrumbs = None
+    previous_chunk_id = None
     
     # MuSiQue has 'paragraphs' field (list of paragraph dictionaries or strings)
     paragraphs = example.get('paragraphs', [])
@@ -72,12 +82,53 @@ def load_musique_example_context_as_documents(
             para_idx_from_dict = para_idx
             is_supporting_from_dict = False
         
+        # Create unique ID for this paragraph
+        para_id = f"{example_id}_{para_idx_from_dict}"
+        
+        # Extract breadcrumbs for this paragraph
+        breadcrumb_result = breadcrumb_extractor.extract_breadcrumbs(
+            text=paragraph_text,
+            paragraph_id=para_idx_from_dict,
+            example_id=example_id,
+            previous_breadcrumbs=previous_breadcrumbs,
+            example_root_entity=example_root_entity
+        )
+        
+        # If this is the first paragraph, extract and store root entity
+        if para_idx == 0 and breadcrumb_result["breadcrumb_path"]:
+            first_entity = breadcrumb_result["breadcrumb_path"][0]
+            if len(first_entity) > 2 and first_entity.lower() not in breadcrumb_extractor.COMMON_PHRASES:
+                example_root_entity = first_entity
+        
         # Create metadata
         metadata = {
             "source": "musique",
             "paragraph_id": para_idx_from_dict,
-            "example_id": example.get('id', 'unknown')
+            "paragraph_unique_id": para_id,
+            "example_id": example_id,
+            # Breadcrumb metadata
+            "breadcrumb_path": breadcrumb_result["breadcrumb_path"],
+            "breadcrumb_string": breadcrumb_result["breadcrumb_string"],
+            "breadcrumb_depth": breadcrumb_result["breadcrumb_depth"],
+            "breadcrumb_confidence": breadcrumb_result["confidence"],
+            "breadcrumb_entities": breadcrumb_result["entities"],
+            "example_root_entity": example_root_entity,
+            # Chunk relationships for context stitching
+            "chunk_id": para_id
         }
+        
+        # Add chunk relationships (for context stitching: i±1 chunks)
+        if previous_chunk_id:
+            metadata["previous_chunk_id"] = previous_chunk_id
+        if para_idx < len(paragraphs) - 1:
+            # Calculate next chunk ID (look ahead to get actual next paragraph index)
+            next_para_item = paragraphs[para_idx + 1]
+            if isinstance(next_para_item, dict):
+                next_para_idx = next_para_item.get('idx', para_idx_from_dict + 1)
+            else:
+                next_para_idx = para_idx_from_dict + 1
+            next_chunk_id = f"{example_id}_{next_para_idx}"
+            metadata["next_chunk_id"] = next_chunk_id
         
         if include_metadata:
             # Check if this paragraph is a supporting fact
@@ -101,6 +152,10 @@ def load_musique_example_context_as_documents(
             metadata=metadata
         )
         documents.append(doc)
+        
+        # Update previous breadcrumbs and chunk ID for next iteration (Breadcrumb Persistence)
+        previous_breadcrumbs = breadcrumb_result["breadcrumb_path"]
+        previous_chunk_id = para_id
     
     return documents
 
@@ -232,6 +287,9 @@ def load_musique_context_as_documents(
     documents = []
     processed_paragraphs = set()  # To avoid duplicates (if same paragraph appears in multiple examples)
     
+    # Initialize breadcrumb extractor for hierarchical metadata extraction
+    breadcrumb_extractor = BreadcrumbExtractor()
+    
     print(f"Processing {len(split_data)} examples...")
     
     for i, example in enumerate(split_data):
@@ -239,6 +297,12 @@ def load_musique_context_as_documents(
             print(f"Processed {i}/{len(split_data)} examples...")
             
         paragraphs = example.get('paragraphs', [])
+        example_id = example.get('id', f'example_{i}')
+        
+        # Track root entity and previous breadcrumbs per example (for continuity)
+        example_root_entity = None
+        previous_breadcrumbs = None
+        previous_chunk_id = None  # Track previous chunk ID for relationships
         
         # ✅ FIRST PRINCIPLES FIX: Handle paragraphs as dictionaries (not strings)
         # MuSiQue paragraphs are dictionaries with 'paragraph_text', 'title', 'idx', etc.
@@ -259,12 +323,27 @@ def load_musique_context_as_documents(
                 para_idx_from_dict = para_idx
             
             # Create a unique ID for this paragraph
-            para_id = f"{example.get('id', i)}_{para_idx_from_dict}"
+            para_id = f"{example_id}_{para_idx_from_dict}"
             
             # Skip if we've already processed this exact paragraph
             if para_id in processed_paragraphs:
                 continue
             processed_paragraphs.add(para_id)
+            
+            # Extract breadcrumbs for this paragraph
+            breadcrumb_result = breadcrumb_extractor.extract_breadcrumbs(
+                text=paragraph_text,
+                paragraph_id=para_idx_from_dict,
+                example_id=example_id,
+                previous_breadcrumbs=previous_breadcrumbs,
+                example_root_entity=example_root_entity
+            )
+            
+            # If this is the first paragraph, extract and store root entity
+            if para_idx == 0 and breadcrumb_result["breadcrumb_path"]:
+                first_entity = breadcrumb_result["breadcrumb_path"][0]
+                if len(first_entity) > 2 and first_entity.lower() not in breadcrumb_extractor.COMMON_PHRASES:
+                    example_root_entity = first_entity
             
             # Create metadata
             metadata = {
@@ -272,8 +351,30 @@ def load_musique_context_as_documents(
                 "paragraph_id": para_idx_from_dict,
                 "paragraph_unique_id": para_id,
                 "dataset_split": dataset_split,
-                "example_id": example.get('id', 'unknown')
+                "example_id": example_id,
+                # Breadcrumb metadata
+                "breadcrumb_path": breadcrumb_result["breadcrumb_path"],
+                "breadcrumb_string": breadcrumb_result["breadcrumb_string"],
+                "breadcrumb_depth": breadcrumb_result["breadcrumb_depth"],
+                "breadcrumb_confidence": breadcrumb_result["confidence"],
+                "breadcrumb_entities": breadcrumb_result["entities"],
+                "example_root_entity": example_root_entity,
+                # Chunk relationships for context stitching
+                "chunk_id": para_id
             }
+            
+            # Add chunk relationships (for context stitching: i±1 chunks)
+            if previous_chunk_id:
+                metadata["previous_chunk_id"] = previous_chunk_id
+            if para_idx < len(paragraphs) - 1:
+                # Calculate next chunk ID (look ahead to get actual next paragraph index)
+                next_para_item = paragraphs[para_idx + 1]
+                if isinstance(next_para_item, dict):
+                    next_para_idx = next_para_item.get('idx', para_idx_from_dict + 1)
+                else:
+                    next_para_idx = para_idx_from_dict + 1
+                next_chunk_id = f"{example_id}_{next_para_idx}"
+                metadata["next_chunk_id"] = next_chunk_id
             
             if include_metadata:
                 supporting_facts = example.get('supporting_facts', [])
@@ -291,6 +392,10 @@ def load_musique_context_as_documents(
                 metadata=metadata
             )
             documents.append(doc)
+            
+            # Update previous breadcrumbs and chunk ID for next iteration (Breadcrumb Persistence)
+            previous_breadcrumbs = breadcrumb_result["breadcrumb_path"]
+            previous_chunk_id = para_id  # Track for next iteration's previous_chunk_id
     
     print(f"Created {len(documents)} documents from {len(processed_paragraphs)} unique paragraphs")
     return documents

@@ -19,6 +19,7 @@ from .tokenization_utils import TokenizationUtils
 from .tokenization_utils import tokenization_utils
 from .mcp_reasoning_state import mcp_state_manager
 from .mcp_reasoning_state import MCPReasoningStateManager
+from .granularity_posterior_module import GranularityPosteriorModule
 
 logger = logging.getLogger(__name__)
 
@@ -188,24 +189,24 @@ class MARAGOrchestrator:
         )
 
         # ------------------------------------------------------------
-        # Signal 2: Entropy (optional uncertainty hint)
+        # ✅ EXPERIMENT 3: Signal 2: Confidence (uncertainty hint) - removed entropy
         # ------------------------------------------------------------
-        entropy = 0.0
+        confidence = 0.5
         if flow_snapshot:
             try:
                 # Try multiple extraction paths
-                if hasattr(flow_snapshot, "entropy"):
-                    entropy = float(flow_snapshot.entropy)
+                if hasattr(flow_snapshot, "confidence"):
+                    confidence = float(flow_snapshot.confidence)
                 elif isinstance(flow_snapshot, dict):
-                    entropy = float(flow_snapshot.get("entropy", 0.0))
+                    confidence = float(flow_snapshot.get("confidence", 0.5))
                 elif hasattr(flow_snapshot, "__dict__"):
-                    entropy = float(getattr(flow_snapshot, "entropy", 0.0))
+                    confidence = float(getattr(flow_snapshot, "confidence", 0.5))
                 # Clamp to valid range
-                entropy = max(0.0, min(1.0, entropy))
+                confidence = max(0.0, min(1.0, confidence))
             except (ValueError, TypeError, AttributeError):
-                entropy = 0.0
+                confidence = 0.5
 
-        high_uncertainty = entropy > 0.5
+        high_uncertainty = confidence < 0.5  # Low confidence = high uncertainty
 
         # ------------------------------------------------------------
         # Signal 3: Multi-hop modifier
@@ -219,7 +220,7 @@ class MARAGOrchestrator:
             logger.info(
                 f"📈 Adaptive expansion: {BASE_LIMIT} → {EXPANDED_LIMIT} "
                 f"(max_score={max_score:.3f}, avg_score={avg_score:.3f}, "
-                f"entropy={entropy:.3f}, hop={hop})"
+                f"confidence={confidence:.3f}, hop={hop})"
             )
             return min(EXPANDED_LIMIT, len(all_retrieved_docs))
 
@@ -947,6 +948,9 @@ class MARAGOrchestrator:
                     # Get main query from plan if plan_goal not provided
                     main_query = plan_goal or plan.get("query") or plan.get("disambiguated_query") or None
                     
+                    # Extract breadcrumb_scope from subquery (from StepDefinerAgent Search Schema)
+                    breadcrumb_scope = subquery.get("breadcrumb_scope")
+                    
                     # Build kwargs to avoid argument conflicts
                     retrieval_kwargs = {
                         "proposed_query": subquery["query"],
@@ -959,6 +963,9 @@ class MARAGOrchestrator:
                     # Only pass plan_goal if it has a value (not None or empty string)
                     if main_query:
                         retrieval_kwargs["plan_goal"] = main_query
+                    # Pass breadcrumb_scope for Bayesian re-ranking
+                    if breadcrumb_scope:
+                        retrieval_kwargs["breadcrumb_scope"] = breadcrumb_scope
                     
                     retrieval_result = await self.state_manager.stabilize_and_retrieve(**retrieval_kwargs)
                     
@@ -1084,6 +1091,48 @@ class MARAGOrchestrator:
             all_retrieved_docs.sort(
                 key=lambda x: x.get("score", 0.0) if isinstance(x.get("score"), (int, float)) else 0.0,
                 reverse=True
+            )
+            
+            # ✅ GRANULARITY POSTERIOR MODULE: Filter documents by hierarchical level alignment
+            # Extract prior granularity from GranularityRegulator constraints
+            prior_domain = None
+            prior_level = None
+            if last_retrieval_result:
+                constraints = last_retrieval_result.get("constraints", [])
+                for constraint in constraints:
+                    # Handle both dict and object formats
+                    constraint_dict = constraint.dict() if hasattr(constraint, 'dict') else (
+                        constraint if isinstance(constraint, dict) else {}
+                    )
+                    if constraint_dict.get('regulator_name') == 'Granularity':
+                        params = constraint_dict.get('parameters', {})
+                        prior_domain = params.get('required_domain')
+                        prior_level = params.get('required_level')
+                        break
+            
+            # Apply Granularity Posterior Module
+            posterior_module = GranularityPosteriorModule(
+                filter_threshold=0.3,  # Configurable threshold
+                weight_by_posterior=True
+            )
+            
+            # Get stabilized query from last retrieval result
+            query_for_posterior = None
+            if last_retrieval_result:
+                query_for_posterior = last_retrieval_result.get("stabilized_query")
+            
+            posterior_result = posterior_module.filter_documents(
+                documents=all_retrieved_docs,
+                prior_domain=prior_domain,
+                prior_level=prior_level,
+                query=query_for_posterior
+            )
+            
+            # Update documents with filtered results
+            all_retrieved_docs = posterior_result['filtered_documents']
+            logger.debug(
+                f"Step {step['id']}: Granularity Posterior filtered {posterior_result['filtered_count']} documents, "
+                f"kept {len(all_retrieved_docs)} (prior: {prior_domain}/{prior_level})"
             )
             
             # ✅ ADAPTIVE COVERAGE: Expand limit based on retrieval quality

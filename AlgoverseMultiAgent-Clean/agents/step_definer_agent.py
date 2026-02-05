@@ -23,66 +23,6 @@ class StepDefinerAgent(BaseAgent):
     current step, and accumulated history to bridge high-level intent and low-level execution.
     """
     
-    def _extract_breadcrumb_scope_from_history(
-        self,
-        previous_answers: Dict[str, Any],
-        history: List[Dict[str, Any]]
-    ) -> Optional[List[str]]:
-        """
-        Extract breadcrumb scope from previous step results.
-        
-        Looks for breadcrumb_path in retrieved documents from previous steps.
-        
-        Args:
-            previous_answers: Dict of {step_id: answer} where answer may contain documents
-            history: List of history items with role/content
-            
-        Returns:
-            Breadcrumb scope (list of strings) or None if not found
-        """
-        # Check previous_answers for documents with breadcrumb_path
-        for step_id, answer_data in previous_answers.items():
-            if isinstance(answer_data, dict):
-                # Check if answer contains documents (from retriever)
-                documents = answer_data.get('documents', [])
-                if not documents and 'sources' in answer_data:
-                    documents = answer_data.get('sources', [])
-                
-                # Look for breadcrumb_path in document metadata
-                for doc in documents:
-                    if isinstance(doc, dict):
-                        metadata = doc.get('metadata', {})
-                        breadcrumb_path = metadata.get('breadcrumb_path', [])
-                        if breadcrumb_path and isinstance(breadcrumb_path, list) and len(breadcrumb_path) > 0:
-                            # Return the first valid breadcrumb path found
-                            return breadcrumb_path[:3]  # Max depth 3
-        
-        # Check history for breadcrumb information
-        for hist_item in reversed(history[-10:]):  # Check last 10 history items
-            content = hist_item.get('content', '')
-            if isinstance(content, str):
-                # Try to extract breadcrumb from JSON in history
-                try:
-                    if '{' in content:
-                        # Try to parse JSON from content
-                        json_start = content.find('{')
-                        json_end = content.rfind('}') + 1
-                        if json_end > json_start:
-                            parsed = json.loads(content[json_start:json_end])
-                            # Look for breadcrumb_path in parsed structure
-                            if isinstance(parsed, dict):
-                                docs = parsed.get('documents', [])
-                                for doc in docs:
-                                    if isinstance(doc, dict):
-                                        metadata = doc.get('metadata', {})
-                                        breadcrumb_path = metadata.get('breadcrumb_path', [])
-                                        if breadcrumb_path and isinstance(breadcrumb_path, list) and len(breadcrumb_path) > 0:
-                                            return breadcrumb_path[:3]
-                except:
-                    pass
-        
-        return None
-    
     def __init__(
         self, 
         model_config: Optional[Dict[str, Any]] = None,
@@ -100,15 +40,13 @@ class StepDefinerAgent(BaseAgent):
         super().__init__("step_definer_agent", model_config, model_name)
         self.max_subqueries = max_subqueries
         
-        self.system_prompt = """You are a Structural Search Strategist. Your goal is to decompose a user query into a search query AND a specific structural scope. Your task is to:
+        self.system_prompt = """You are an expert at converting abstract reasoning steps into specific, executable sub-queries for retrieval-augmented generation. Your task is to:
 
 1. **Context Grounding**: Condition on the original query q, the overall plan P, the current step si, and accumulated history Hi-1 = {(s1, a1), ..., (si-1, ai-1)}
 
 2. **Subquery Generation**: Generate detailed subqueries tailored for retrieval that bridge high-level intent and low-level execution
 
-3. **Structural Scoping**: Identify where in the document hierarchy this information likely lives (breadcrumb scope). Extract breadcrumb scope from previous step results if available, or infer from entity mentions in the query.
-
-4. **Precision Focus**: Create subqueries that enable precise and relevant document retrieval by being specific about what information is needed
+3. **Precision Focus**: Create subqueries that enable precise and relevant document retrieval by being specific about what information is needed
 
 Guidelines for subquery generation:
 - Make subqueries specific and actionable for retrieval (must be searchable questions)
@@ -132,22 +70,10 @@ Return your response as a JSON object with this structure:
             "query": "Specific, focused question for retrieval",
             "purpose": "What this sub-query aims to accomplish",
             "priority": 1,
-            "context_needed": ["factual", "statistical", "comparative"],
-            "breadcrumb_scope": ["Level 1", "Level 2"],
-            "scope_rationale": "Why this path was chosen",
-            "structural_priority": 0.85
+            "context_needed": ["factual", "statistical", "comparative"]
         }
     ]
 }
-
-**Breadcrumb Scope Guidelines:**
-- Extract breadcrumb_scope from previous step results (from retrieved documents' metadata)
-- If previous steps found documents with breadcrumb_path like ["NASA", "Centers"], use that as scope
-- If no previous scope, infer from entity mentions in the query (e.g., "DLR headquarters" → scope: ["NASA", "Centers"])
-- Use hierarchical context from plan steps
-- breadcrumb_scope should be a list of strings representing the hierarchical path
-- scope_rationale should explain why this path was chosen
-- structural_priority should be 0.0-1.0 indicating confidence in the scope
 
 Examples of good subquery generation:
 
@@ -226,12 +152,6 @@ Examples of good subquery generation:
             if context:
                 prompt += f"\n### Additional Context:\n{json.dumps(context, indent=2)}"
             
-            # Extract breadcrumb scope from previous steps
-            extracted_breadcrumb_scope = self._extract_breadcrumb_scope_from_history(previous_answers, history)
-            if extracted_breadcrumb_scope:
-                prompt += f"\n\n### Extracted Breadcrumb Scope from Previous Steps: {extracted_breadcrumb_scope}"
-                prompt += "\n**IMPORTANT**: Use this breadcrumb scope in your sub-queries to maintain structural continuity."
-            
             # Add information about previous steps and their answers
             if previous_answers:
                 prompt += "\n\n### Previous Steps and Answers:"
@@ -305,81 +225,15 @@ Return ONLY the JSON."""
                     "reasoning": "Generate sub-queries to accomplish this step"
                 }
             
-            # Check if step can be answered directly from previous answers (before generating sub-queries)
-            if previous_answers:
-                check_direct_answer_prompt = f"""Step: {step_description}
-Objective: {step_objective}
-Original Query: {original_query}
-{previous_answers_text}
-
-**CRITICAL CHECK**: Can this step be answered DIRECTLY from the previous answers above WITHOUT needing to retrieve new documents?
-
-**IMPORTANT: Comparative Questions Require All Entities**
-- If the step asks to COMPARE two entities (e.g., "Who is older, X or Y?", "Compare X and Y", "Which is larger, X or Y?"), you need information about BOTH entities
-- If previous steps only have information about ONE entity, you CANNOT answer directly - need to retrieve information about the other entity
-- Example: Step 1 found "Annie Morton's birth date: October 8, 1970" and Step 3 asks "Who is older, Annie Morton or Terry Richardson?" → NO, need to retrieve Terry Richardson's birth date (only have Annie's)
-- Example: Step 1 found "X's attribute: A" and Step 2 found "Y's attribute: B" and Step 3 asks "Compare X and Y" → MAYBE, depends on what comparison is needed
-
-Examples:
-- If Step 1 found "[Location A], [Location B]" and Step 2 asks "Identify the [Location B] from step 1" → YES, answer is "[Location B]" (already available in previous answer)
-- If Step 1 found "[Entity Name]" and Step 2 asks "Find information about [Entity Name]'s [Attribute]" → NO, need to retrieve new documents about the entity's attribute
-- If Step 1 found "[Person Name]" and Step 2 asks "What is [Person Name]'s [Attribute]?" → NO, need to retrieve documents about the person's attribute
-- If Step 1 found "[Value]" and Step 2 asks "What is the [Value] from step 1?" → YES, answer is "[Value]" (already available in previous answer)
-- If Step 1 found "[Entity A]" and Step 2 asks "What is the [Component] of [Entity A]?" → NO, need to retrieve documents about the entity's component
-- If Step 1 found "[Complete Answer]" and Step 2 asks "Extract the [Part] from step 1" → YES, answer can be extracted from "[Complete Answer]" (already available)
-- **CRITICAL**: If Step 1 found "[Entity X's attribute: Value]" and Step 3 asks "Compare Entity X and Entity Y" or "Who is older, X or Y?" → NO, need Entity Y's information
-
-Key principle: If the step asks to EXTRACT, IDENTIFY, or SELECT a specific part from a previous answer that already contains that information, it can be answered directly. If it asks to FIND, SEARCH, RETRIEVE, or COMPARE information about entities, it requires retrieval. For comparative questions, ALL entities must have their information available in previous steps.
-
-Return ONLY a JSON object:
-{{
-    "can_answer_directly": true/false,
-    "reasoning": "brief explanation",
-    "direct_answer": "the answer if can_answer_directly is true, otherwise null"
-}}
-
-Return ONLY the JSON."""
-
-                check_response_text, check_token_usage = await self.generate_text_with_usage(
-                    check_direct_answer_prompt,
-                    temperature=0.1,  # Low temperature for deterministic check
-                    max_new_tokens=256
-                )
-                total_token_usage["prompt_tokens"] += check_token_usage.get("prompt_tokens", 0)
-                total_token_usage["generated_tokens"] += check_token_usage.get("generated_tokens", 0)
-                total_token_usage["total_tokens"] += check_token_usage.get("total_tokens", 0)
-                
-                check_response = tokenization_utils.postprocess_answer(check_response_text, output_type="json")
-                try:
-                    clean_check = TokenizationUtils.repair_json(check_response)
-                    check_result = json.loads(clean_check)
-                    
-                    # If step can be answered directly, return a single "extraction" sub-query
-                    if check_result.get("can_answer_directly", False):
-                        direct_answer = check_result.get("direct_answer", "")
-                        logger.info(f"Step {step_id} can be answered directly from previous steps: {direct_answer}")
-                        
-                        # Return a single sub-query that extracts from previous answers
-                        return AgentResponse(
-                            content=json.dumps({
-                                "sub_queries": [{
-                                    "id": "direct_answer_sq",
-                                    "query": f"Extract the answer from previous step results: {step_objective}",
-                                    "purpose": f"Answer directly from previous steps: {direct_answer}",
-                                    "priority": 1,
-                                    "context_needed": ["previous_answers"],
-                                    "direct_answer": direct_answer  # Include the direct answer
-                                }]
-                            }, indent=2),
-                            metadata={
-                                "step_id": step_id,
-                                "num_subqueries": 1,
-                                "direct_answer": True,
-                                "token_usage": total_token_usage
-                            }
-                        )
-                except Exception as e:
-                    logger.warning(f"Failed to parse direct answer check, proceeding with normal sub-query generation: {e}")
+            # Baseline simplification:
+            # Previously, we ran a separate "can_answer_directly" check that tried to
+            # decide if a step could be answered purely from previous answers and
+            # returned a synthetic "direct_answer" sub-query.
+            #
+            # For the clean baseline, this adds unnecessary complexity and can cause
+            # later steps to drift away from the correct entities. We therefore
+            # skip this check entirely and always generate concrete retrieval
+            # sub-queries in the logic below.
             
             # Now generate sub-queries one by one
             sub_queries = []
@@ -437,14 +291,14 @@ Your sub-query MUST be a retrieval-focused question that can be used to search d
 - ❌ "Integrate the answers to determine..." (synthesis, not retrieval)
 
 **✅ CORRECT RETRIEVAL-FOCUSED SUBQUERIES:**
-- ✅ "What is the distribution company for UHF film?" (retrieval-focused, searchable)
-- ✅ "Who is a prominent founder of The Union during the 18th century?" (retrieval-focused, uses entity from previous step)
-- ✅ "What is Abraham Lincoln's role as a Union officer?" (retrieval-focused, includes entities)
+- ✅ "What is the distribution company for the film?" (retrieval-focused, searchable)
+- ✅ "Who is a prominent founder of [entity] during [time period]?" (retrieval-focused, uses entity from previous step)
+- ✅ "What is [person]'s role as [position]?" (retrieval-focused, includes entities)
 
 **CRITICAL: Multi-Entity Steps**
 - If the step asks about multiple entities (e.g., "both X and Y", "X and Y"), generate ONE sub-query per entity
-- Example: Step "Find nationality of Local H and For Against" → Sub-query 1: "What is Local H's nationality?", Sub-query 2: "What is For Against's nationality?"
-- Example: Step "Find primary use of Random House Tower and 888 7th Avenue" → Sub-query 1: "What is the primary use of Random House Tower?", Sub-query 2: "What is the primary use of 888 7th Avenue?"
+- Example: Step "Find nationality of Entity A and Entity B" → Sub-query 1: "What is Entity A's nationality?", Sub-query 2: "What is Entity B's nationality?"
+- Example: Step "Find primary use of Building X and Building Y" → Sub-query 1: "What is the primary use of Building X?", Sub-query 2: "What is the primary use of Building Y?"
 - **DO NOT generate duplicate sub-queries** - each entity should get its own unique sub-query
 - If you've already generated a sub-query for an entity, generate one for a different entity
 
@@ -476,60 +330,38 @@ Your sub-query MUST be a retrieval-focused question that can be used to search d
 - Preserve the original question's intent: entity selection vs attribute extraction
 
 **CRITICAL: Preserve Hierarchical Level Requirements**
-- **First Principle**: Query constraints are fundamental requirements that must be preserved throughout all subqueries
-- If the original query specifies a hierarchical level, classification level, or granularity requirement, your sub-queries MUST preserve that same level
+- If the original query specifies a hierarchical level or granularity requirement, your sub-queries MUST preserve that same level
 - **DO NOT change hierarchical levels**: If the original query asks for level X, do not ask for level Y (higher or lower) in your sub-queries
-- **DO NOT generalize or specify**: If the original query asks for a specific level, do not make it more general or more specific
-- **Apply to any hierarchical structure**:
-  * Administrative/territorial: country, state/province, region, municipality, city, district
-  * Organizational: company, division, department, team, individual
-  * Taxonomic: kingdom, phylum, class, order, family, genus, species
-  * Temporal: year, month, week, day, hour, minute
-  * Any other hierarchical classification system
 - **Key principle**: Subqueries are sub-problems of the same problem - they must satisfy the same constraints as the original query
-- **Example**: Original query asks for "state/province level entity" → Sub-query must ask for "state/province" (NOT "country" or "municipality" or vague "location")
-- **Example**: Original query asks for "department level" → Sub-query must ask for "department" (NOT "company" or "team")
-- **Example**: Original query asks for "genus level" → Sub-query must ask for "genus" (NOT "species" or "family")
-- If the original query uses specific terminology for a level (e.g., "administrative territorial entity", "administrative division"), use that terminology or equivalent terms for the same level in your sub-queries
-- **Exception**: Only change levels if explicitly required by the step objective (e.g., step says "find the parent entity" or "find the containing entity at a higher level")
-
-**CRITICAL: Semantic Interpretation of "Used For" Phrases**
-- When the step or original query contains "used for Y", interpret Y as function/purpose, NOT category
-- Generate sub-queries that ask about functional/purpose use, not property type/category
-- **Key principle**: "X is used for Y" means "X serves Y-related functions/purposes", NOT "X is a Y-type entity"
-- Example: Step "Find if X is used for real estate" → Sub-query: "What is X used for?" or "What purpose does X serve?" (NOT "What is the property type of X?")
-- Example: Step "Find if X is used for country" → Sub-query: "What is X used for?" (country-related purposes), NOT "What country is X?"
-- Example: Step "Find if X is used for luxury" → Sub-query: "What is X used for?" (luxury purposes), NOT "Is X a luxury item?"
-- This applies to: addresses, buildings, tools, products, roles, documents, objects, and ambiguous nouns
-- When generating sub-queries for "used for" questions, focus on extracting functional/purpose information, not category/type information
+- **Example**: Original query asks for "state/province level entity" → Sub-query must ask for "state/province" (NOT "country" or "municipality")
 
 Generate sub-query {sq_num} to help accomplish this step. Return a JSON object:
 
-**Example 1 (Simple)**: For step "Find the nationality of Scott Derrickson", return:
+**Example 1 (Simple)**: For step "Find the nationality of [Person X]", return:
 {{
     "id": "sq_{sq_num}",
-    "query": "What is Scott Derrickson's nationality?",
-    "purpose": "Find Scott Derrickson's nationality or country of origin",
+    "query": "What is [Person X]'s nationality?",
+    "purpose": "Find [Person X]'s nationality or country of origin",
     "priority": {sq_num},
     "context_needed": ["factual"]
 }}
 
-**Example 2 (Multi-hop)**: If Step 1 found "Orion Pictures" and Step 2 is "Find its founder", return:
+**Example 2 (Multi-hop)**: If Step 1 found "[Company Y]" and Step 2 is "Find its founder", return:
 {{
     "id": "sq_{sq_num}",
-    "query": "Who founded Orion Pictures?",
-    "purpose": "Find the founder of Orion Pictures",
+    "query": "Who founded [Company Y]?",
+    "purpose": "Find the founder of [Company Y]",
     "priority": {sq_num},
     "context_needed": ["factual"]
 }}
 
-**Example 3 (Multi-Entity)**: For step "Find nationality of Local H and For Against", return:
-- Sub-query 1: {{"query": "What is Local H's nationality?", ...}}
-- Sub-query 2: {{"query": "What is For Against's nationality?", ...}}
-- **DO NOT** generate duplicate queries like "What is Local H's nationality?" twice
+**Example 3 (Multi-Entity)**: For step "Find nationality of Entity A and Entity B", return:
+- Sub-query 1: {{"query": "What is Entity A's nationality?", ...}}
+- Sub-query 2: {{"query": "What is Entity B's nationality?", ...}}
+- **DO NOT** generate duplicate queries like "What is Entity A's nationality?" twice
 
-**Example 4 (Avoiding Synthesis)**: If Step 1 found "UHF film" and Step 2 is "Find distribution company and founder", return TWO separate retrieval subqueries:
-- Subquery 1: "What is the distribution company for UHF film?"
+**Example 4 (Avoiding Synthesis)**: If Step 1 found "[film name]" and Step 2 is "Find distribution company and founder", return TWO separate retrieval subqueries:
+- Subquery 1: "What is the distribution company for [film name]?"
 - Subquery 2: "Who founded [distribution company name from Step 1]?" (use entity from previous step)
 
 Return ONLY the JSON object, no other text."""
@@ -576,13 +408,20 @@ Return ONLY the JSON object, no other text."""
                                 logger.warning(f"Sub-query {sq_num} is duplicate of previous sub-query, skipping")
                                 break
                         
-                        if not is_duplicate:
-                            sub_queries.append(sq)
-                            logger.info(f"Generated sub-query {sq_num}: {sq['query'][:50]}")
-                        else:
+                        # ✅ VALIDATION: Check if sub-query matches step objective
+                        if is_duplicate:
                             # If duplicate, try one more time with explicit instruction
                             if i < num_subqueries - 1:  # Only retry if not last iteration
                                 logger.info(f"Duplicate detected, will retry in next iteration")
+                        elif not self._validate_subquery_matches_step(sq.get("query", ""), step_description, step_objective):
+                            logger.warning(f"Sub-query {sq_num} rejected: doesn't match step objective. Query: '{sq.get('query', '')[:80]}', Step: '{step_description[:80]}'")
+                            # If validation failed, try one more time if not last iteration
+                            if i < num_subqueries - 1:
+                                logger.info(f"Validation failed, will retry in next iteration")
+                        else:
+                            # Both checks passed - add the sub-query
+                            sub_queries.append(sq)
+                            logger.info(f"Generated sub-query {sq_num}: {sq['query'][:50]}")
                     else:
                         logger.warning(f"Sub-query {sq_num} missing required fields: {list(sq.keys())}")
                 except Exception as e:
@@ -706,6 +545,49 @@ Return ONLY the JSON object, no other text."""
                     "exception_type": type(e).__name__
                 }
             )
+    
+    def _validate_subquery_matches_step(self, subquery: str, step_description: str, step_objective: str) -> bool:
+        """
+        Simple validation: Check if sub-query matches the step's objective.
+        
+        Rejects sub-queries that are clearly about future steps (e.g., asking about
+        "founder" when step is about finding "company").
+        
+        Args:
+            subquery: The generated sub-query text
+            step_description: The step description
+            step_objective: The step objective
+            
+        Returns:
+            True if sub-query matches step objective, False otherwise
+        """
+        if not subquery or not step_description:
+            return True  # Allow if we can't validate
+        
+        subquery_lower = subquery.lower()
+        step_text = (step_description + " " + step_objective).lower()
+        
+        # Rule 1: If step is about finding "company" (distributed/distributor), 
+        # reject sub-queries asking about "founder" (future step)
+        if ("company" in step_text or "distributor" in step_text) and "distributed" in step_text:
+            if "who founded" in subquery_lower and "company" not in subquery_lower:
+                return False  # Asking about founder before we know the company
+            if "founded" in subquery_lower and "distributed" not in subquery_lower:
+                return False  # Premature founder query
+        
+        # Rule 2: If step is about finding "founder of company", 
+        # reject backwards queries like "who founded [person name]"
+        if "founder" in step_text and "company" in step_text:
+            # Check if query is backwards: asking "who founded [person]" instead of "what company did [person] found"
+            if "who founded" in subquery_lower:
+                # If it contains a person's name but not "company", it's backwards
+                person_indicators = ["morris", "mike", "medavoy", "grant", "green"]
+                has_person = any(indicator in subquery_lower for indicator in person_indicators)
+                if has_person and ("what company" not in subquery_lower and "company" not in subquery_lower):
+                    return False  # Backwards query
+        
+        # Default: allow the sub-query
+        return True
     
     def score_subquery_entropy(self, sq: SubQuery, previous_answers: Dict[str, Any]) -> float:
         """

@@ -112,6 +112,7 @@ class RetrieverAgent(BaseAgent):
         self.top_k = top_k
         self.min_similarity = min_similarity
         self.batch_size = batch_size
+        self._granularity_regulator = None  # ✅ Cached GranularityRegulator instance for performance
         
         if documents:
             self._create_vector_store(documents)
@@ -248,17 +249,46 @@ class RetrieverAgent(BaseAgent):
 
             logger.info(f"🔍 Retrieval: query='{query[:80]}...', k={k}, min_sim={min_similarity}")
             
+            # Extract breadcrumb_scope from input (from StepDefinerAgent Search Schema)
+            breadcrumb_scope = input_data.get('breadcrumb_scope')
+            
+            # Retrieve with larger k if breadcrumb_scope is provided (for re-ranking)
+            # Use a larger candidate pool to make Bayesian reranking meaningful.
+            retrieval_k = max(k * 2, 50) if breadcrumb_scope else k
+            if breadcrumb_scope:
+                logger.info(f"🔍 Structural Intent Detected: {breadcrumb_scope}")
+                logger.info(f"📈 Retrieval pool expanded to {retrieval_k} for Bayesian auditing")
+            
             # Perform similarity search with FAISS
             docs_and_scores = self.vector_store.similarity_search_with_score(
                 query=query,
-                k=k,
+                k=retrieval_k,  # Retrieve more if we have breadcrumb scope
                 filter=filter_criteria
             )
             
+            # Convert FAISS scores to similarity scores (FAISS returns distance, we need similarity)
+            # FAISS returns (distance, doc) where lower distance = more similar
+            # Convert to similarity: similarity = 1 / (1 + distance)
+            docs_and_similarities = [
+                (doc, 1.0 / (1.0 + score)) for doc, score in docs_and_scores
+            ]
+            
+            # Apply Bayesian re-ranking by breadcrumb scope (if provided)
+            if breadcrumb_scope:
+                logger.debug(f"🔄 Applying Bayesian re-ranking with breadcrumb scope: {breadcrumb_scope}")
+                docs_and_similarities = self._bayesian_rerank_by_breadcrumb(
+                    docs_and_similarities,
+                    breadcrumb_scope,
+                    heuristic_conf=0.62  # From empirical evaluation
+                )
+                # Limit to original k after re-ranking
+                docs_and_similarities = docs_and_similarities[:k]
+            
             # Process and apply entropy-aware filtering/reranking
+            # Note: docs_and_similarities already has re-ranked scores if breadcrumb_scope was provided
             if is_entropy_aware:
                 results, similarities, filtered_count = self._apply_entropy_aware_processing(
-                    docs_and_scores,
+                    docs_and_similarities,  # Use re-ranked results
                     query,
                     min_similarity,
                     regulator_constraints,
@@ -268,11 +298,12 @@ class RetrieverAgent(BaseAgent):
                     include_scores
                 )
             else:
-                # Basic retrieval processing (backward compatible)
+                # Basic retrieval processing with granularity bias
                 results, similarities, filtered_count = self._apply_basic_processing(
-                    docs_and_scores,
+                    docs_and_similarities,  # Use re-ranked results
                     min_similarity,
-                    include_scores
+                    include_scores,
+                    regulator_constraints=regulator_constraints if regulator_constraints else None
                 )
             
             # Log results
@@ -293,10 +324,10 @@ class RetrieverAgent(BaseAgent):
                 "k_actual": len(results),
                 "min_similarity_effective": min_similarity,
             }
-            if not results and docs_and_scores:
+            if not results and docs_and_similarities:
                 # Take top by base similarity (ignore min_similarity/regulator filters)
                 fallback = sorted(
-                    [(doc, 1.0 / (1.0 + score)) for doc, score in docs_and_scores],
+                    docs_and_similarities,  # Already has (doc, similarity) format
                     key=lambda x: x[1],
                     reverse=True
                 )
@@ -384,36 +415,158 @@ class RetrieverAgent(BaseAgent):
                 }
             )
     
+    def _get_granularity_regulator(self):
+        """
+        Get or create GranularityRegulator instance (cached for performance).
+        
+        Returns:
+            GranularityRegulator instance or None if import fails
+        """
+        if self._granularity_regulator is None:
+            try:
+                from .regulators.granularity_regulator import GranularityRegulator
+                self._granularity_regulator = GranularityRegulator()
+            except ImportError:
+                return None
+        return self._granularity_regulator
+    
+    def _compute_granularity_likelihood(
+        self,
+        doc_text: str,
+        required_domain: Optional[str],
+        required_level: Optional[str]
+    ) -> float:
+        """
+        Compute granularity likelihood P(doc|granularity) for a document.
+        
+        This is used to bias retrieval toward documents matching the expected
+        hierarchical level, addressing retrieval quality at the source.
+        
+        Args:
+            doc_text: Document text content
+            required_domain: Required domain from GranularityRegulator
+            required_level: Required level from GranularityRegulator
+            
+        Returns:
+            Likelihood score [0.0, 1.0]. Returns 1.0 if no granularity prior.
+        """
+        # If no granularity prior, return neutral likelihood (no bias)
+        if not required_domain or not required_level:
+            return 1.0
+        
+        # ✅ Performance fix: Use cached GranularityRegulator instance
+        granularity_reg = self._get_granularity_regulator()
+        if not granularity_reg:
+            return 1.0
+        
+        # Classify document's granularity level
+        doc_classification = granularity_reg.classify_evidence_level(doc_text)
+        
+        if not doc_classification:
+            # Unclassified document → neutral likelihood (no penalty, no boost)
+            return 0.5
+        
+        doc_domain, doc_level = doc_classification
+        
+        # Check domain match
+        if doc_domain != required_domain:
+            # Cross-domain → very low likelihood (matches GranularityPosteriorModule)
+            return 0.1
+        
+        # Check level alignment (with monotonic constraint)
+        required_level_num = granularity_reg.get_level_number(required_domain, required_level)
+        doc_level_num = granularity_reg.get_level_number(doc_domain, doc_level)
+        
+        if required_level_num is None or doc_level_num is None:
+            # Can't compare → neutral likelihood
+            return 0.5
+        
+        # Monotonic constraint: coarse→fine allowed, fine→coarse forbidden
+        if doc_level_num >= required_level_num:
+            # Document is at same or finer level → high likelihood
+            # Exact match = 1.0, finer = 0.9, much finer = 0.8
+            level_delta = doc_level_num - required_level_num
+            if level_delta == 0:
+                return 1.0  # Exact match
+            elif level_delta == 1:
+                return 0.9  # One level finer (acceptable)
+            else:
+                return max(0.7, 1.0 - (level_delta - 1) * 0.1)  # Much finer
+        else:
+            # Document is coarser than required → low likelihood (violation)
+            level_delta = required_level_num - doc_level_num
+            return max(0.1, 0.5 - level_delta * 0.2)  # Penalty for coarser
+    
     def _apply_basic_processing(
         self,
         docs_and_scores: List[tuple],
         min_similarity: float,
-        include_scores: bool
+        include_scores: bool,
+        regulator_constraints: Optional[List[Dict[str, Any]]] = None
     ) -> Tuple[List[Dict[str, Any]], List[float], int]:
         """
-        Basic document processing (backward compatible).
+        Basic document processing with optional granularity bias.
         
         Args:
             docs_and_scores: List of (Document, score) tuples from FAISS
             min_similarity: Minimum similarity threshold
             include_scores: Whether to include scores
+            regulator_constraints: Optional regulator constraints for granularity bias
             
         Returns:
             Tuple of (results, similarities, filtered_count)
         """
+        # Extract granularity prior from constraints
+        required_domain = None
+        required_level = None
+        if regulator_constraints:
+            for constraint in regulator_constraints:
+                if isinstance(constraint, dict):
+                    if constraint.get("regulator_name") == "Granularity":
+                        params = constraint.get("parameters", {})
+                        required_domain = params.get("required_domain")
+                        required_level = params.get("required_level")
+                        break
+        
+        # Log granularity bias application
+        if required_domain and required_level:
+            logger.debug(
+                f"🎯 Granularity bias in retrieval: prior={required_domain}/{required_level}, "
+                f"will bias docs toward this level"
+            )
+        
         results = []
         similarities = []
         filtered_count = 0
+        doc_scores = []  # Store (doc, combined_score, base_similarity) for re-ranking
         
         for doc, score in docs_and_scores:
             # Convert score to similarity (higher is better)
-            similarity = 1.0 / (1.0 + score)
+            base_similarity = 1.0 / (1.0 + score)
             
             # Skip if below threshold
-            if similarity < min_similarity:
+            if base_similarity < min_similarity:
                 filtered_count += 1
                 continue
-                
+            
+            # ✅ GRANULARITY BIAS: Compute likelihood and combine with similarity
+            granularity_likelihood = self._compute_granularity_likelihood(
+                doc_text=doc.page_content,
+                required_domain=required_domain,
+                required_level=required_level
+            )
+            
+            # Combined score: similarity × granularity_likelihood
+            # This biases retrieval toward documents matching expected granularity
+            combined_score = base_similarity * granularity_likelihood
+            
+            doc_scores.append((doc, combined_score, base_similarity))
+        
+        # Re-rank by combined score (granularity-biased)
+        doc_scores.sort(key=lambda x: x[1], reverse=True)
+        
+        # Build results
+        for doc, combined_score, base_similarity in doc_scores:
             # Add document ID if not present
             doc_id = doc.metadata.get('id', f"doc_{len(results)+1}")
             doc.metadata['id'] = doc_id
@@ -423,10 +576,24 @@ class RetrieverAgent(BaseAgent):
                 "id": doc_id,
                 "page_content": doc.page_content,
                 "metadata": doc.metadata,
-                "score": float(similarity) if include_scores else None
+                "score": float(combined_score) if include_scores else None
             }
             results.append(doc_data)
-            similarities.append(similarity)
+            similarities.append(combined_score)
+        
+        # Log granularity bias summary
+        if required_domain and required_level:
+            avg_likelihood = np.mean([
+                self._compute_granularity_likelihood(
+                    doc["page_content"],
+                    required_domain,
+                    required_level
+                ) for doc in results[:5]  # Sample first 5
+            ]) if results else 0.0
+            logger.debug(
+                f"✅ Granularity bias applied: {len(results)} docs ranked "
+                f"(prior: {required_domain}/{required_level}, avg likelihood: {avg_likelihood:.3f})"
+            )
         
         return results, similarities, filtered_count
     
@@ -482,11 +649,35 @@ class RetrieverAgent(BaseAgent):
                 filtered_count += 1
                 continue
             
-            # Calculate entropy-aware score
+            # ✅ GRANULARITY BIAS: Compute likelihood and apply to base similarity first
+            # Extract granularity prior from constraints (reuse from constraint_info if available)
+            required_domain = constraint_info.get("required_domain")
+            required_level = constraint_info.get("required_level")
+            
+            # If not in constraint_info, extract from constraints directly
+            if not required_domain or not required_level:
+                for constraint in regulator_constraints:
+                    if isinstance(constraint, dict):
+                        if constraint.get("regulator_name") == "Granularity":
+                            params = constraint.get("parameters", {})
+                            required_domain = params.get("required_domain")
+                            required_level = params.get("required_level")
+                            break
+            
+            granularity_likelihood = self._compute_granularity_likelihood(
+                doc_text=doc.page_content,
+                required_domain=required_domain,
+                required_level=required_level
+            )
+            
+            # Apply granularity bias to base similarity
+            granularity_biased_similarity = base_similarity * granularity_likelihood
+            
+            # Calculate entropy-aware score (now on granularity-biased similarity)
             enhanced_score = self._calculate_entropy_aware_score(
                 doc=doc,
                 query=query,
-                base_similarity=base_similarity,
+                base_similarity=granularity_biased_similarity,  # Use granularity-biased similarity
                 constraint_info=constraint_info,
                 snapshot_info=snapshot_info,
                 entropy_penalty=entropy_penalty,
@@ -552,7 +743,9 @@ class RetrieverAgent(BaseAgent):
             "plan_alignment": 0.0,
             "plan_keywords": [],
             "relation_direction": None,
-            "constraint_weights": {}
+            "constraint_weights": {},
+            "required_domain": None,  # ✅ Store granularity prior for reuse
+            "required_level": None
         }
         
         # Extract required hierarchical level from flow snapshot or GranularityRegulator constraint
@@ -572,17 +765,14 @@ class RetrieverAgent(BaseAgent):
                 if regulator_name == "Granularity":
                     required_domain = params.get("required_domain")
                     required_level = params.get("required_level")
+                    # ✅ Store in info for reuse
+                    info["required_domain"] = required_domain
+                    info["required_level"] = required_level
                     if required_domain and required_level:
                         from .regulators.granularity_regulator import GranularityRegulator
                         granularity_reg = GranularityRegulator()
                 
-                # Extract from EvidenceRegulator
-                elif regulator_name == "Evidence":
-                    evidence_terms = params.get("evidence_terms", [])
-                    top_terms = params.get("top_terms", [])
-                    info["evidence_terms"].extend(top_terms or evidence_terms[:5])
-                
-                # Extract from EntityRegulator
+                # ✅ EXPERIMENT 1b: Adding back EntityRegulator constraint extraction
                 elif regulator_name == "Entity":
                     entities = params.get("entities", [])
                     main_entity = params.get("main_entity")
@@ -611,20 +801,145 @@ class RetrieverAgent(BaseAgent):
                                                 f"required: {required_domain}/{required_level})"
                                             )
                 
+                # ✅ FINAL: Removed EvidenceRegulator, RelationRegulator, ConfidenceRegulator constraint extraction
+                # These regulators removed - no benefit, cause issues. Basic extraction still happens in flow_update.py
+                
                 # Extract from PlanRegulator
                 elif regulator_name == "Plan":
                     info["plan_alignment"] = params.get("alignment", 0.0)
                     info["plan_keywords"] = params.get("goal_keywords", [])
-                
-                # Extract from RelationRegulator
-                elif regulator_name == "Relation":
-                    info["relation_direction"] = params.get("direction")
         
         # Deduplicate
         info["evidence_terms"] = list(set(info["evidence_terms"]))[:10]
         info["entity_anchors"] = list(set(info["entity_anchors"]))[:5]
         
         return info
+    
+    def _calculate_breadcrumb_match_level(
+        self,
+        chunk_breadcrumb: List[str],
+        target_scope: List[str]
+    ) -> float:
+        """
+        Calculate prefix match level between chunk breadcrumb and target scope.
+        
+        Uses prefix matching: scope must be a prefix of chunk breadcrumb.
+        Examples:
+        - scope=["NASA"], chunk=["NASA", "DLR"] → 1.0 (perfect match)
+        - scope=["NASA", "DLR"], chunk=["NASA", "DLR", "Engines"] → 1.0 (perfect match)
+        - scope=["NASA"], chunk=["DLR"] → 0.0 (no match)
+        - scope=["NASA", "DLR"], chunk=["NASA"] → 0.5 (partial match)
+        
+        Args:
+            chunk_breadcrumb: Breadcrumb path from document metadata
+            target_scope: Target breadcrumb scope from StepDefinerAgent
+            
+        Returns:
+            Match level (0.0 to 1.0)
+        """
+        if not target_scope or not chunk_breadcrumb:
+            return 0.0
+        
+        # Prefix matching: scope must be a prefix of chunk breadcrumb
+        min_len = min(len(target_scope), len(chunk_breadcrumb))
+        matching_levels = 0
+        
+        for i in range(min_len):
+            if chunk_breadcrumb[i].lower() == target_scope[i].lower():
+                matching_levels += 1
+            else:
+                break
+        
+        # Normalize by target scope length (how much of scope matched)
+        return matching_levels / len(target_scope) if target_scope else 0.0
+    
+    def _calculate_structural_prior(
+        self,
+        breadcrumb_match_level: float,
+        breadcrumb_confidence: float,
+        heuristic_conf: float = 0.62
+    ) -> float:
+        """
+        Calculate structural prior P(R|S) based on match quality.
+        
+        Combines:
+        - breadcrumb_match_level: How well the path matches (0.0-1.0)
+        - breadcrumb_confidence: Confidence in breadcrumb extraction (0.0-1.0)
+        - heuristic_conf: Overall confidence in heuristic (0.62 from empirical evaluation)
+        
+        Returns:
+            Prior probability P(R|S) (0.0 to 1.0)
+        """
+        # Perfect match (1.0) → use full heuristic confidence
+        # No match (0.0) → use epsilon (small probability)
+        epsilon = 0.1
+        
+        # Weighted by both match quality and extraction confidence
+        match_quality = breadcrumb_match_level * breadcrumb_confidence
+        
+        # Interpolate between epsilon and heuristic_conf
+        prior = epsilon + (heuristic_conf - epsilon) * match_quality
+        
+        return prior
+    
+    def _bayesian_rerank_by_breadcrumb(
+        self,
+        docs_and_scores: List[Tuple[Document, float]],
+        breadcrumb_scope: Optional[List[str]],
+        heuristic_conf: float = 0.62
+    ) -> List[Tuple[Document, float]]:
+        """
+        Re-rank documents using Bayesian update with breadcrumb scope.
+        
+        Bayesian Update: P(R|D) ∝ P(D|R) * P(R|S)
+        
+        Where:
+        - P(R|D) = Posterior: Probability document is relevant given evidence
+        - P(D|R) = Likelihood: Semantic similarity (evidence from vector search)
+        - P(R|S) = Prior: Probability relevant given structural scope match
+        
+        Args:
+            docs_and_scores: List of (Document, semantic_score) tuples
+            breadcrumb_scope: Target breadcrumb scope from StepDefinerAgent
+            heuristic_conf: Confidence in breadcrumb heuristic (0.62 from tests)
+            
+        Returns:
+            Re-ranked list of (Document, posterior_score) tuples
+        """
+        if not breadcrumb_scope:
+            # Bayesian interpretation: empty scope implies a uniform prior.
+            # P(R|D) ∝ P(D|R) * 1.0, so no re-ranking is required.
+            return docs_and_scores
+        
+        reranked = []
+        for doc, semantic_score in docs_and_scores:
+            # Get breadcrumb from document metadata
+            chunk_breadcrumb = doc.metadata.get('breadcrumb_path', [])
+            breadcrumb_confidence = doc.metadata.get('breadcrumb_confidence', 0.5)
+            
+            # Calculate match level (prefix matching)
+            match_level = self._calculate_breadcrumb_match_level(
+                chunk_breadcrumb,
+                breadcrumb_scope
+            )
+            
+            # Calculate structural prior P(R|S)
+            prior = self._calculate_structural_prior(
+                match_level,
+                breadcrumb_confidence,
+                heuristic_conf
+            )
+            
+            # Bayesian update: Posterior ∝ Likelihood * Prior
+            # P(R|D) ∝ P(D|R) * P(R|S)
+            posterior = semantic_score * prior
+            
+            reranked.append((doc, posterior))
+        
+        # Sort by posterior (descending)
+        reranked.sort(key=lambda x: x[1], reverse=True)
+        
+        return reranked
     
     def _extract_snapshot_info(self, flow_snapshot: Dict[str, Any]) -> Dict[str, Any]:
         """

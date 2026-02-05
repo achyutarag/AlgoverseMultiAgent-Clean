@@ -41,7 +41,8 @@ async def stabilize_and_retrieve(
     plan_goal: Optional[str] = None,
     retriever_agent=None,
     current_step_index: Optional[int] = None,
-    total_steps: Optional[int] = None
+    total_steps: Optional[int] = None,
+    breadcrumb_scope: Optional[List[str]] = None
 ) -> Dict[str, Any]:
     """
     Stabilize reasoning flow then perform entropy-aware retrieval.
@@ -266,6 +267,7 @@ async def _entropy_aware_retrieve(
     previous_answers: Optional[Dict[str, Any]] = None,
     hop: int = 1,
     is_step_first_hop: bool = False,
+    breadcrumb_scope: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Perform entropy-aware retrieval with regulator constraints.
@@ -287,33 +289,9 @@ async def _entropy_aware_retrieve(
     # Normalize flag
     is_step_first_hop = bool(is_step_first_hop)
     
-    # ✅ FIX: Extract entropy/diffusion with proper fallback handling
+    # ✅ EXPERIMENT 3: Removed entropy tracking - using simple heuristics instead
     entropy_val = 0.0
     diffusion_val = 0.0
-    
-    if flow_snapshot:
-        if isinstance(flow_snapshot, dict):
-            entropy_val = flow_snapshot.get('entropy', 0.0)
-            diffusion_val = flow_snapshot.get('diffusion_coefficient', 0.0)
-        else:
-            entropy_val = getattr(flow_snapshot, 'entropy', 0.0)
-            diffusion_val = getattr(flow_snapshot, 'diffusion_coefficient', 0.0)
-    
-    # ✅ FIX: Use dict version as fallback if object values are 0.0
-    if (entropy_val == 0.0 or diffusion_val == 0.0) and flow_snapshot_dict:
-        if entropy_val == 0.0:
-            entropy_val = flow_snapshot_dict.get('entropy', 0.0)
-        if diffusion_val == 0.0:
-            diffusion_val = flow_snapshot_dict.get('diffusion_coefficient', 0.0)
-
-    # ✅ EXTRA GUARD: If still zero entropy, try entropy_tracker current state (avoids stagnation)
-    if entropy_val == 0.0 and hasattr(self, "entropy_tracker") and self.entropy_tracker:
-        try:
-            es = self.entropy_tracker.get_current_state()
-            if es and getattr(es, "entropy", 0.0) > 0.0:
-                entropy_val = es.entropy
-        except Exception:
-            pass
     
     # Extract hierarchical level requirement from GranularityRegulator constraint
     required_domain = None
@@ -367,10 +345,11 @@ async def _entropy_aware_retrieve(
         "regulator_constraints": [c.dict() if hasattr(c, 'dict') else c for c in constraints],
         "flow_snapshot": flow_snapshot_dict,
         "entropy_penalty": entropy_val,  # ✅ FIX: Use extracted value
-        "diffusion_penalty": diffusion_val  # ✅ FIX: Use extracted value
+        "diffusion_penalty": diffusion_val,  # ✅ FIX: Use extracted value
+        "breadcrumb_scope": breadcrumb_scope  # Pass breadcrumb scope for Bayesian re-ranking
     }
 
-    # Early-hop recall bump when entropy collapsed
+    # ✅ EXPERIMENT 3: Simplified early-hop recall bump (removed entropy check)
     try:
         hop_num = int(getattr(flow_snapshot, "hop", 1) if flow_snapshot else 1)
     except Exception:
@@ -381,13 +360,14 @@ async def _entropy_aware_retrieve(
             hop_num = int(hop)
     except Exception:
         pass
-    if entropy_val == 0.0 and hop_num <= 2:
+    # Simple heuristic: early hops get slightly more documents
+    if hop_num <= 2:
         old_k = retrieval_input["k"]
         old_min_sim = retrieval_input["min_similarity"]
         retrieval_input["k"] = max(int(retrieval_input.get("k") or 0), 15)
         retrieval_input["min_similarity"] = max(0.1, old_min_sim * 0.8)
         logger.debug(
-            f"🚀 Early-hop recall bump: hop={hop_num}, entropy=0.0 → "
+            f"🚀 Early-hop recall bump: hop={hop_num} → "
             f"k {old_k}->{retrieval_input['k']}, min_sim {old_min_sim:.3f}->{retrieval_input['min_similarity']:.3f}"
         )
 
@@ -418,13 +398,13 @@ async def _entropy_aware_retrieve(
             f"belief_count={belief_count}, evidence_terms={evidence_terms_count}"
         )
 
-    # Force exploration only when entropy is "collapsed" AND state/evidence is weak.
-    if entropy_val < EPS_ENTROPY_FLOOR and (belief_count < MIN_BELIEF_COUNT or evidence_density_low):
+    # ✅ EXPERIMENT 3: Simplified exploration trigger (removed entropy check)
+    # Force exploration when state/evidence is weak (simple heuristic)
+    if belief_count < MIN_BELIEF_COUNT or evidence_density_low:
         old_k = retrieval_input["k"]
         retrieval_input["k"] = max(int(retrieval_input.get("k") or 0), K_MIN)
         logger.debug(
-            f"🧯 Entropy floor triggered: H={entropy_val:.3f} < {EPS_ENTROPY_FLOOR} with "
-            f"belief_count={belief_count}, evidence_terms={len(evidence_terms)} → forcing k {old_k}→{retrieval_input['k']}"
+            f"🧯 Exploration triggered: belief_count={belief_count}, evidence_terms={len(evidence_terms)} → forcing k {old_k}→{retrieval_input['k']}"
         )
     
     # Absolute guard: clamp k on every call
@@ -437,8 +417,7 @@ async def _entropy_aware_retrieve(
     # Call retriever with constraints (log requested k/min_sim)
     logger.debug(
         f"[RetrievalCall] hop={hop_num}, req_k={retrieval_input.get('k')}, "
-        f"min_sim={retrieval_input.get('min_similarity'):.3f} "
-        f"entropy={entropy_val:.3f}"
+        f"min_sim={retrieval_input.get('min_similarity'):.3f}"
     )
     result = await retriever_agent.process(retrieval_input)
     docs = result.metadata.get("documents", []) or []
@@ -594,12 +573,18 @@ def _check_termination_validity(
     Returns:
         Dict with "can_terminate" (bool) and "reason" (str) explaining why/why not
     """
-    if not flow_snapshot or not self.entropy_tracker:
-        return {"can_terminate": False, "reason": "Missing flow snapshot or entropy tracker"}
+    if not flow_snapshot:
+        return {"can_terminate": False, "reason": "Missing flow snapshot"}
     
-    entropy_state = self.entropy_tracker.get_current_state()
-    if not entropy_state:
-        return {"can_terminate": False, "reason": "No entropy state available"}
+    # ✅ EXPERIMENT 3: Removed entropy tracker - using simple confidence from flow_snapshot instead
+    # Get confidence from flow_snapshot (not from entropy_state)
+    confidence = 0.0
+    if isinstance(flow_snapshot, dict):
+        confidence = flow_snapshot.get('confidence', 0.0)
+    elif hasattr(flow_snapshot, 'confidence'):
+        confidence = float(getattr(flow_snapshot, 'confidence', 0.0))
+    else:
+        confidence = 0.0
     
     # ====================================================================
     # CONVERGENCE CONDITION 1: Plan steps must be completed (or on last step)
@@ -628,49 +613,20 @@ def _check_termination_validity(
         plan_goal=plan_goal
     )
     
-    # Adaptive entropy threshold: Lower for simple queries, higher for complex
-    # Simple: < 0.4, Medium: < 0.5, Complex: < 0.6
-    entropy_threshold = 0.5  # Default
-    if query_complexity == "simple":
-        entropy_threshold = 0.4
-    elif query_complexity == "complex":
-        entropy_threshold = 0.6
-    
+    # ✅ EXPERIMENT 3: Removed entropy/drift checks - using simple confidence threshold
     # Adaptive confidence threshold: Higher for simple queries, lower for complex
     # Simple: >= 0.85, Medium: >= 0.75, Complex: >= 0.7
-    confidence_threshold = 0.75  # Default (relaxed from 0.8)
+    confidence_threshold = 0.75  # Default
     if query_complexity == "simple":
         confidence_threshold = 0.85
     elif query_complexity == "complex":
         confidence_threshold = 0.7
     
-    # Adaptive drift threshold: Lower for simple queries, higher for complex
-    # Simple: < 0.25, Medium: < 0.3, Complex: < 0.4
-    drift_threshold = 0.3  # Default
-    if query_complexity == "simple":
-        drift_threshold = 0.25
-    elif query_complexity == "complex":
-        drift_threshold = 0.4
-    
-    # Check entropy
-    if entropy_state.entropy >= entropy_threshold:
+    # Check confidence (from flow_snapshot, not entropy_state)
+    if confidence < confidence_threshold:
         return {
             "can_terminate": False, 
-            "reason": f"Entropy too high: {entropy_state.entropy:.3f} >= {entropy_threshold:.3f} (adaptive threshold for {query_complexity} query)"
-        }
-    
-    # Check confidence
-    if entropy_state.confidence < confidence_threshold:
-        return {
-            "can_terminate": False, 
-            "reason": f"Confidence too low: {entropy_state.confidence:.3f} < {confidence_threshold:.3f} (adaptive threshold for {query_complexity} query)"
-        }
-    
-    # Check drift
-    if entropy_state.drift_from_previous >= drift_threshold:
-        return {
-            "can_terminate": False, 
-            "reason": f"Drift too high: {entropy_state.drift_from_previous:.3f} >= {drift_threshold:.3f} (adaptive threshold for {query_complexity} query)"
+            "reason": f"Confidence too low: {confidence:.3f} < {confidence_threshold:.3f} (adaptive threshold for {query_complexity} query)"
         }
     
     # ====================================================================
@@ -788,12 +744,11 @@ def _check_termination_validity(
                 }
     
     # All convergence conditions met
+    # ✅ EXPERIMENT 3: Removed entropy/drift - using confidence only
     return {
         "can_terminate": True,
         "reason": (
-            f"Convergence conditions met: entropy={entropy_state.entropy:.3f} (low), "
-            f"confidence={entropy_state.confidence:.3f} (high), "
-            f"drift={entropy_state.drift_from_previous:.3f} (low), "
+            f"Convergence conditions met: confidence={confidence:.3f} (high), "
             f"answer stable, hierarchical level satisfied, plan steps completed, "
             f"answer satisfies query boundary condition"
         )

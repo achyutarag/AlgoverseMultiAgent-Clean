@@ -114,98 +114,34 @@ Examples of good extraction:
 
 **Complete JSON Example**:
 
-For the subquery "What is Scott Derrickson's nationality?" with documents about Scott Derrickson, return:
+For the subquery "What is [Person X]'s nationality?" with documents about [Person X], return:
 
 {
-    "query": "What is Scott Derrickson's nationality?",
-    "extraction_reasoning": "I need to find information about Scott Derrickson's nationality. I'll extract any biographical information that might indicate his nationality or country of origin.",
+    "query": "What is [Person X]'s nationality?",
+    "extraction_reasoning": "I need to find information about [Person X]'s nationality. I'll extract any biographical information that might indicate their nationality or country of origin.",
     "extracted_passages": [
         {
-            "text": "Scott Derrickson (born July 16, 1966) is an American director, screenwriter and producer.",
-            "document_id": "hotpotqa_Scott_Derrickson",
+            "text": "[Person X] (born [date]) is a [nationality] [profession].",
+            "document_id": "doc_1",
             "chunk_id": "chunk_1",
             "relevance": 0.9,
-            "reasoning": "This sentence directly states Scott Derrickson's nationality as American",
-            "source_context": "From Scott Derrickson biographical article"
+            "reasoning": "This sentence directly states [Person X]'s nationality",
+            "source_context": "From biographical article"
         },
         {
-            "text": "He lives in Los Angeles, California.",
-            "document_id": "hotpotqa_Scott_Derrickson", 
+            "text": "They live in [location].",
+            "document_id": "doc_1", 
             "chunk_id": "chunk_1",
             "relevance": 0.6,
-            "reasoning": "Living in California suggests American nationality",
-            "source_context": "From Scott Derrickson biographical article"
+            "reasoning": "Location information suggests nationality",
+            "source_context": "From biographical article"
         }
     ],
-    "aggregated_evidence": "Scott Derrickson is an American director, screenwriter and producer, born July 16, 1966, living in Los Angeles, California.",
-    "extraction_summary": "Successfully extracted nationality information showing Scott Derrickson is American, with supporting biographical details"
+    "aggregated_evidence": "[Person X] is a [nationality] [profession], born [date], living in [location].",
+    "extraction_summary": "Successfully extracted nationality information with supporting biographical details"
 }
 
 **IMPORTANT**: Always return valid JSON. Do not include any text before or after the JSON object."""
-    
-    def _get_stitched_context(
-        self,
-        doc: Dict[str, Any],
-        all_documents: List[Dict[str, Any]]
-    ) -> Dict[str, str]:
-        """
-        Get stitched context for a document using chunk relationships (i±1 logic).
-        
-        Implements context stitching by combining:
-        - Previous chunk (i-1)
-        - Current chunk (i)
-        - Next chunk (i+1)
-        - Parent context (from breadcrumb_path)
-        
-        Args:
-            doc: Current document with metadata
-            all_documents: All available documents for lookup
-            
-        Returns:
-            Dict with 'previous', 'current', 'next', 'parent' context strings
-        """
-        metadata = doc.get('metadata', {})
-        chunk_id = metadata.get('chunk_id')
-        previous_chunk_id = metadata.get('previous_chunk_id')
-        next_chunk_id = metadata.get('next_chunk_id')
-        breadcrumb_path = metadata.get('breadcrumb_path', [])
-        
-        # Build a lookup map by chunk_id for fast access
-        doc_map = {}
-        for d in all_documents:
-            d_metadata = d.get('metadata', {})
-            d_chunk_id = d_metadata.get('chunk_id')
-            if d_chunk_id:
-                doc_map[d_chunk_id] = d
-        
-        # Get previous chunk
-        previous_text = ""
-        if previous_chunk_id and previous_chunk_id in doc_map:
-            prev_doc = doc_map[previous_chunk_id]
-            previous_text = prev_doc.get('page_content', '').strip()
-        
-        # Get current chunk
-        current_text = doc.get('page_content', '').strip()
-        
-        # Get next chunk
-        next_text = ""
-        if next_chunk_id and next_chunk_id in doc_map:
-            next_doc = doc_map[next_chunk_id]
-            next_text = next_doc.get('page_content', '').strip()
-        
-        # Get parent context (breadcrumb path summary)
-        parent_text = ""
-        if breadcrumb_path and len(breadcrumb_path) > 1:
-            # Parent is the path without the last element
-            parent_path = breadcrumb_path[:-1]
-            parent_text = f"Context: {' > '.join(parent_path)}"
-        
-        return {
-            'previous': previous_text,
-            'current': current_text,
-            'next': next_text,
-            'parent': parent_text
-        }
     
     async def process(self, input_data: Dict[str, Any]) -> AgentResponse:
         """
@@ -295,35 +231,20 @@ For the subquery "What is Scott Derrickson's nationality?" with documents about 
                 )
                 prompt += f"\n### Previous Context (most recent last):\n{history_str}\n"
             
-            # Add documents to the prompt with stitched context (i±1 logic)
+            # Add documents to the prompt with better formatting
             for i, doc in enumerate(documents):
                 doc_id = doc.get('id', f'doc_{i+1}')
-                metadata = doc.get('metadata', {})
+                metadata = json.dumps(doc.get('metadata', {}), ensure_ascii=False, indent=2)
+                content = doc.get('page_content', '').strip()
                 score = doc.get('score', 0.0)
                 
-                # Get stitched context (previous, current, next, parent)
-                stitched = self._get_stitched_context(doc, documents)
-                
-                # Format breadcrumb string for display
-                breadcrumb_string = metadata.get('breadcrumb_string', 'Unknown')
-                
-                prompt += f"\n[Document {i+1}, ID: {doc_id}, Retrieval Score: {score:.3f}]\n"
-                prompt += f"Breadcrumb: {breadcrumb_string}\n"
-                
-                # Add stitched context sections
-                if stitched['previous']:
-                    prompt += f"PREVIOUS CHUNK: {stitched['previous'][:max_chars_per_doc//4]}\n"
-                if stitched['current']:
-                    prompt += f"TARGET CHUNK: {stitched['current'][:max_chars_per_doc]}\n"
-                if stitched['next']:
-                    prompt += f"NEXT CHUNK: {stitched['next'][:max_chars_per_doc//4]}\n"
-                if stitched['parent']:
-                    prompt += f"PARENT CONTEXT: {stitched['parent']}\n"
-                
-                # Truncate if needed
-                total_length = len(stitched['previous']) + len(stitched['current']) + len(stitched['next'])
-                if total_length > max_chars_per_doc * 2:
-                    prompt += "... [context truncated for length]"
+                prompt += (
+                    f"\n[Document {i+1}, ID: {doc_id}, Retrieval Score: {score:.3f}]\n"
+                    f"Metadata: {metadata}\n"
+                    f"Content: {content[:max_chars_per_doc]}"  # Use the calculated value"
+                )
+                if len(content) > max_chars_per_doc:
+                    prompt += "... [truncated]"
             
             # Add extraction instructions
             prompt += f"""

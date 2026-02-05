@@ -74,33 +74,35 @@ class StateManager:
         
         # Initialize diffusion-aware components
         try:
-            from ..entropy_tracker import EntropyTracker
+            # ✅ EXPERIMENT 3: Removed EntropyTracker - using simple heuristics instead
+            # from ..entropy_tracker import EntropyTracker
             from ..reasoning_flow import ReasoningFlowIndex
             from ..regulators.regulator_manager import RegulatorManager
             from ..regulators.granularity_regulator import GranularityRegulator
+            # ✅ EXPERIMENT 1b: Adding back EntityRegulator
             from ..regulators.entity_regulator import EntityRegulator
-            from ..regulators.relation_regulator import RelationRegulator
-            from ..regulators.evidence_regulator import EvidenceRegulator
-            from ..regulators.confidence_regulator import ConfidenceRegulator
+            # ✅ EXPERIMENT 1b: Removed EvidenceRegulator, RelationRegulator, ConfidenceRegulator - no benefit
+            # ✅ EXPERIMENT 2: PlanRegulator confirmed as CORE component - restores stability/trajectory control
             from ..regulators.plan_regulator import PlanRegulator
             
-            # Initialize entropy tracker
-            self.entropy_tracker = EntropyTracker()
+            # ✅ EXPERIMENT 3: Removed entropy tracker - using simple heuristics instead
+            self.entropy_tracker = None
             
-            # Initialize reasoning flow (with entropy tracker integration)
-            self.reasoning_flow = ReasoningFlowIndex(entropy_tracker=self.entropy_tracker)
+            # Initialize reasoning flow (without entropy tracker integration)
+            self.reasoning_flow = ReasoningFlowIndex(entropy_tracker=None)
             
             # Initialize regulators
             # ✅ GranularityRegulator FIRST - Initial Condition (u(x,0))
             # This sets the correct hierarchical level before retrieval begins,
             # preventing hierarchical leakage and level-mismatch cascades
+            # ✅ FINAL: Optimal 3-regulator configuration (Granularity + Entity + Plan)
+            # PlanRegulator confirmed as CORE - increases stability/trajectory control
+            # (fewer hops + fewer anchors + fewer catastrophic step drift cases)
+            # EvidenceRegulator, RelationRegulator, ConfidenceRegulator removed - no benefit
             regulators = [
                 GranularityRegulator(weight=1.0),  # FIRST - initial condition
-                EntityRegulator(weight=0.9),
-                RelationRegulator(weight=0.8),
-                EvidenceRegulator(weight=0.85),
-                ConfidenceRegulator(weight=0.75),
-                PlanRegulator(weight=0.9)
+                EntityRegulator(weight=0.9),        # ✅ CRITICAL - restores full MCP performance
+                PlanRegulator(weight=0.9)          # ✅ CORE - stability/trajectory control
             ]
             self.regulator_manager = RegulatorManager(regulators)
             
@@ -150,9 +152,26 @@ class StateManager:
         
         # ✅ FIX: Properly bind stabilize_and_retrieve to avoid argument conflicts
         # Create a bound method wrapper that ensures correct argument passing
-        async def bound_stabilize_and_retrieve(proposed_query, hop, previous_answers, plan_goal=None, retriever_agent=None, current_step_index=None, total_steps=None):
+        async def bound_stabilize_and_retrieve(
+            proposed_query,
+            hop,
+            previous_answers,
+            plan_goal=None,
+            retriever_agent=None,
+            current_step_index=None,
+            total_steps=None,
+            breadcrumb_scope=None
+        ):
             return await stabilize_and_retrieve(
-                self, proposed_query, hop, previous_answers, plan_goal, retriever_agent, current_step_index, total_steps
+                self,
+                proposed_query,
+                hop,
+                previous_answers,
+                plan_goal,
+                retriever_agent,
+                current_step_index,
+                total_steps,
+                breadcrumb_scope
             )
         self.stabilize_and_retrieve = bound_stabilize_and_retrieve
         
@@ -214,8 +233,9 @@ class StateManager:
             self.reasoning_flow.flow_states.clear()
             self.reasoning_flow.bucket_anchors.clear()
         
-        if self.entropy_tracker:
-            self.entropy_tracker.entropy_history.clear()
+        # ✅ EXPERIMENT 3: Removed entropy tracker - no history to clear
+        # if self.entropy_tracker:
+        #     self.entropy_tracker.entropy_history.clear()
         
         logger.info(f"Execution state initialized for query: {main_query[:100]}...")
     

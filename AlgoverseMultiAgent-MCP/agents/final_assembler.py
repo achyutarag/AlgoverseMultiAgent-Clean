@@ -147,11 +147,9 @@ class FinalAssembler:
             logger.info("Final answer assembly completed successfully")
             
             # ====================================================================
-            # COLLECT CONVERGENCE METADATA FOR DIFFUSION PROCESS
+            # ✅ EXPERIMENT 3: COLLECT CONVERGENCE METADATA (removed entropy/drift tracking)
             # ====================================================================
-            # Extract entropy trajectory, drift trajectory, and anchors from steps
-            entropy_trajectory = []
-            drift_trajectory = []
+            # Extract confidence trajectory and anchors from steps
             confidence_trajectory = []
             all_anchors = []
             
@@ -159,14 +157,16 @@ class FinalAssembler:
                 qa_result = step.get("qa_result", {})
                 diffusion_meta = qa_result.get("diffusion_metadata", {})
                 if diffusion_meta:
-                    entropy_trajectory.append(diffusion_meta.get("entropy", 0.5))
-                    drift_trajectory.append(diffusion_meta.get("diffusion_coefficient", 0.5))
+                    # ✅ EXPERIMENT 3: Removed entropy/drift - using confidence only
                     confidence_trajectory.append(diffusion_meta.get("confidence", 0.5))
                     all_anchors.extend(diffusion_meta.get("new_anchors", []))
             
-            # Calculate stability score (1 - max_drift)
-            max_drift = max(drift_trajectory) if drift_trajectory else 0.5
-            stability_score = 1.0 - max_drift
+            # Calculate stability score based on confidence variance (lower variance = more stable)
+            if len(confidence_trajectory) >= 2:
+                confidence_variance = sum((c - sum(confidence_trajectory)/len(confidence_trajectory))**2 for c in confidence_trajectory) / len(confidence_trajectory)
+                stability_score = 1.0 - min(1.0, confidence_variance)  # Normalize to [0, 1]
+            else:
+                stability_score = 0.5  # Default if insufficient data
             
             return {
                 "final_answer": final_answer_obj.final_answer,
@@ -177,18 +177,16 @@ class FinalAssembler:
                 "evidence_quality": final_answer_obj.evidence_quality,
                 "metadata": final_answer_obj.execution_metadata,
                 "structured_answer": final_answer_obj.dict(),
-                # ✅ CONVERGENCE METADATA (Diffusion-to-Convergence Model)
+                # ✅ EXPERIMENT 3: CONVERGENCE METADATA (removed entropy/drift - using confidence only)
                 "convergence_metadata": {
-                    "entropy_trajectory": entropy_trajectory,
-                    "drift_trajectory": drift_trajectory,
+                    "entropy_trajectory": [],  # Removed
+                    "drift_trajectory": [],  # Removed
                     "confidence_trajectory": confidence_trajectory,
                     "anchors_used": all_anchors,
                     "stability_score": stability_score,
                     "convergence_detected": (
-                        len(entropy_trajectory) >= 2 and
-                        entropy_trajectory[-1] < entropy_trajectory[0] and
-                        (drift_trajectory[-1] < drift_trajectory[0] if len(drift_trajectory) >= 2 else True) and
-                        (confidence_trajectory[-1] > confidence_trajectory[0] if len(confidence_trajectory) >= 2 else True)
+                        len(confidence_trajectory) >= 2 and
+                        confidence_trajectory[-1] > confidence_trajectory[0]  # Confidence increasing
                     )
                 }
             }

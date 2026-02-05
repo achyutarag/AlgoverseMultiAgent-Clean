@@ -1,0 +1,17 @@
+Question,Prediction,Ground_Truth,ExactMatch,F1Score,Hops
+Who is the spouse of the Green performer?,Miquette Giraudy,Miquette Giraudy,1.0000,1.0000,5
+Who founded the company that distributed the film UHF?,Steven Spielberg,Mike Medavoy,0.0000,0.0000,7
+What administrative territorial entity is the owner of Ciudad Deportiva located?,"Nuevo Laredo, Mexico  Nuevo Laredo, Mexico",Tamaulipas,0.0000,0.0000,9
+Where is Ulrich Walter's employer headquartered?,"Cologne, Germany  Cologne, Germany",Cologne,0.0000,0.4000,7
+Which company owns the manufacturer of Learjet 60?,Bombardier Inc.,Bombardier Inc.,1.0000,1.0000,5
+Who is the child of Caroline LeRoy's spouse?,Daniel Fletcher Webster  Daniel Fletcher Webster,Fletcher Webster,0.0000,0.5000,5
+"Who is the grandmother of Philippe, Duke of Orléans?",Louis,Marie de' Medici,0.0000,0.0000,7
+What is the goal of the group that European Movement Germany is a member of?,"promoting European integration, and disseminating information about it  promoting European integration, and disseminating information about it",European integration,0.0000,0.2222,7
+What company succeeded the owner of Empire Sports Network?,Time Warner Cable  Time Warner Cable,Time Warner Cable,0.0000,0.6667,5
+What province shares a border with the province where Lago District is located?,Cabo Delgado Province  Cabo Delgado Province,Cabo Delgado Province,0.0000,0.6667,7
+
+Summary,,,,,
+Exact Match,,,0.2000,,
+F1 Score,,,0.4456,,
+Avg Hops,,,6.40,,
+Examples,,,10,,

@@ -128,18 +128,28 @@ def _load_musique_from_github(dataset_split: str = "validation") -> List[Dict[st
     
     # Check for local JSONL file in multiple locations
     current_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.dirname(current_dir)  # Go up from agents/ to project root
+    project_root = os.path.dirname(current_dir)  # Go up from agents/ to Clean directory
     cwd = os.getcwd()  # Current working directory
     
+    # ✅ FIX: Also check parent directory and MCP sibling directory
+    parent_dir = os.path.dirname(project_root)  # Parent of Clean (AlgoverseMultiAgent)
+    mcp_dir = os.path.join(parent_dir, "AlgoverseMultiAgent-MCP")  # MCP sibling directory
     
     possible_paths = [
-        os.path.join(project_root, "musique_data_v1.0", "data", filename),  # In musique_data_v1.0/data/
-        os.path.join(project_root, "data", filename),  # In project_root/data/
+        # Check in Clean directory first
+        os.path.join(project_root, "musique_data_v1.0", "data", filename),  # In Clean/musique_data_v1.0/data/
+        os.path.join(project_root, "data", filename),  # In Clean/data/
         os.path.join(cwd, "musique_data_v1.0", "data", filename),  # In cwd/musique_data_v1.0/data/
         os.path.join(cwd, "data", filename),  # In cwd/data/
-        os.path.join(project_root, filename),  # In project root
+        os.path.join(project_root, filename),  # In Clean root
         os.path.join(cwd, filename),  # In current directory
         os.path.join(current_dir, "..", "data", filename),  # Parent/data/
+        # ✅ FIX: Check MCP directory (where dataset actually is)
+        os.path.join(mcp_dir, "musique_data_v1.0", "data", filename),  # In MCP/musique_data_v1.0/data/
+        os.path.join(mcp_dir, "data", filename),  # In MCP/data/
+        # ✅ FIX: Check parent directory
+        os.path.join(parent_dir, "musique_data_v1.0", "data", filename),  # In parent/musique_data_v1.0/data/
+        os.path.join(parent_dir, "data", filename),  # In parent/data/
     ]
     
     print(f"Looking for {filename} in:")
@@ -155,7 +165,8 @@ def _load_musique_from_github(dataset_split: str = "validation") -> List[Dict[st
         raise FileNotFoundError(
             f"Could not find {filename} in any of these locations:\n" +
             "\n".join(f"  - {os.path.abspath(p)}" for p in possible_paths) +
-            f"\n\nPlease extract musique_v1.0.zip and place the 'data' folder in the project directory."
+            f"\n\nPlease extract musique_v1.0.zip and place the 'data' folder in the project directory, "
+            f"or ensure the dataset exists in AlgoverseMultiAgent-MCP/musique_data_v1.0/data/"
         )
     
     print(f"\n✅ Found file: {jsonl_path}")

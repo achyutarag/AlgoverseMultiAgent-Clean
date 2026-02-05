@@ -1,4 +1,10 @@
 """
+✅ EXPERIMENT 3: DEPRECATED - EntropyTracker removed
+This file is kept for reference only. Entropy tracking has been removed
+and replaced with simple heuristics (confidence-based compression, 
+belief count checks, etc.)
+
+Original purpose:
 EntropyTracker: Tracks uncertainty and diffusion in multi-hop reasoning.
 
 Models reasoning as a diffusion process where:

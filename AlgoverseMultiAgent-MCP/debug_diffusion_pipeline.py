@@ -15,12 +15,14 @@ Usage:
 
 import asyncio
 import json
+import csv
 import logging
 import os
 import sys
 import difflib
 import re
 import numpy as np
+import statistics
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
@@ -45,13 +47,12 @@ logger = logging.getLogger(__name__)
 
 # ABLATED / EXPERIMENTAL seatbelt: optional stabilizer for oscillation failures
 ABLATE_STABILIZER = os.getenv("ABLATE_STABILIZER", "0") == "1"
-ABLATE_ENTROPY_GUARD = os.getenv("ABLATE_ENTROPY_GUARD", "0") == "1"
-# Temporary: make guard threshold configurable to verify firing
-ENTROPY_GUARD_THRESHOLD = float(os.getenv("ENTROPY_GUARD_THRESHOLD", "0.1"))
+# ✅ EXPERIMENT 3: Removed entropy guard - using simple heuristics instead
+ABLATE_ENTROPY_GUARD = True  # Always disabled (entropy tracking removed)
+ENTROPY_GUARD_THRESHOLD = 0.1  # Not used anymore
 
 logger.info(
-    f"ABLATE_ENTROPY_GUARD={ABLATE_ENTROPY_GUARD}, "
-    f"ENTROPY_GUARD_THRESHOLD={ENTROPY_GUARD_THRESHOLD}, "
+    f"ABLATE_ENTROPY_GUARD={ABLATE_ENTROPY_GUARD} (always True - entropy removed), "
     f"ABLATE_STABILIZER={ABLATE_STABILIZER}"
 )
 ENTITY_CONTEXT_TOKENS = {
@@ -232,7 +233,8 @@ def _apply_entropy_guard(
     retrieval_params: Dict[str, Any],
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
-    ABLATED / EXPERIMENTAL: early-hop entropy maturity guard.
+    ✅ EXPERIMENT 3: DEPRECATED - Entropy guard removed.
+    This function is kept for backward compatibility but always returns unchanged params.
     Returns (maybe_modified_retrieval_params, guard_meta). Current hop only.
     """
     logger.info(f"[EntropyGuard] enter: hop={hop_idx}, entropy={entropy_val}")
@@ -436,8 +438,8 @@ class DiffusionDebugger:
                 'summary': self._summarize_regulator_decisions(regulator_decisions)
             },
             'flow_state': {
-                'entropy': flow_snapshot.get('entropy', 0.0),
-                'diffusion': flow_snapshot.get('diffusion_coefficient', 0.0),
+                'entropy': 0.0,  # ✅ EXPERIMENT 3: Removed
+                'diffusion': 0.0,  # ✅ EXPERIMENT 3: Removed
                 'confidence': flow_snapshot.get('confidence', 0.0),
                 'beliefs': flow_snapshot.get('beliefs', {}),
                 'anchors_count': len(flow_snapshot.get('anchors', [])),
@@ -559,13 +561,13 @@ class DiffusionDebugger:
             'failure_modes': self._identify_failure_modes(),
             'traces': [t.to_dict() for t in self.traces]
         }
-        # Diagnostic bucketing: oscillation / entropy / short-horizon
-        ENTROPY_LOW = 0.05
-        LOW_ENT_FRACTION = 0.8  # 80%
+        # ✅ EXPERIMENT 3: Diagnostic bucketing: oscillation / confidence / short-horizon (removed entropy)
+        CONFIDENCE_HIGH = 0.7
+        HIGH_CONF_FRACTION = 0.8  # 80%
         buckets = {
             "oscillating": [],
-            "stable_low_entropy": [],
-            "stable_high_entropy": [],
+            "stable_high_confidence": [],  # Replaced stable_low_entropy
+            "stable_low_confidence": [],  # Replaced stable_high_entropy
             "short_horizon": [],
         }
         for t in self.traces:
@@ -578,24 +580,25 @@ class DiffusionDebugger:
                 continue
 
             has_osc = False
-            low_ent_count = 0
+            high_conf_count = 0
             for h in hops:
                 dm = h.get("debug_metadata", {}) if isinstance(h, dict) else {}
                 vel = dm.get("velocity", {}) if isinstance(dm, dict) else {}
                 if vel.get("oscillating") or vel.get("oscillation_alert"):
                     has_osc = True
-                ent = h.get("flow_state", {}).get("entropy", 0.0)
-                if ent <= ENTROPY_LOW:
-                    low_ent_count += 1
+                # ✅ EXPERIMENT 3: Use confidence instead of entropy
+                conf = h.get("flow_state", {}).get("confidence", 0.5)
+                if conf >= CONFIDENCE_HIGH:
+                    high_conf_count += 1
 
-            low_ent_frac = low_ent_count / len(hops) if hops else 0.0
+            high_conf_frac = high_conf_count / len(hops) if hops else 0.0
 
             if has_osc:
                 buckets["oscillating"].append({"question": question, "f1": f1, "em": em})
-            elif low_ent_frac >= LOW_ENT_FRACTION:
-                buckets["stable_low_entropy"].append({"question": question, "f1": f1, "em": em})
+            elif high_conf_frac >= HIGH_CONF_FRACTION:
+                buckets["stable_high_confidence"].append({"question": question, "f1": f1, "em": em})
             else:
-                buckets["stable_high_entropy"].append({"question": question, "f1": f1, "em": em})
+                buckets["stable_low_confidence"].append({"question": question, "f1": f1, "em": em})
 
         report["diagnostics"] = {
             "buckets": buckets,
@@ -620,13 +623,84 @@ class DiffusionDebugger:
                     guard_counts["skip_reasons"][sr] += 1
         guard_counts["skip_reasons"] = dict(guard_counts["skip_reasons"])
         report["diagnostics"]["entropy_guard_summary"] = guard_counts
+        
+        # Calculate additional metrics for Google Sheets
+        metrics = self._calculate_additional_metrics()
+        report["summary"].update(metrics)
+        
         return report
+    
+    def _calculate_additional_metrics(self) -> Dict[str, Any]:
+        """Calculate additional metrics for tracking: confidence mean/variance, granularity errors, etc."""
+        confidences = []
+        docs_per_hop = []
+        granularity_violations = 0
+        early_terminations = 0
+        notes = []
+        
+        for trace in self.traces:
+            trace_has_violation = False
+            
+            for hop in trace.hops:
+                # Confidence
+                conf = hop.get('qa', {}).get('confidence', 0.5)
+                confidences.append(conf)
+                
+                # Docs per hop
+                docs = hop.get('retrieval', {}).get('documents_retrieved', 0)
+                docs_per_hop.append(docs)
+                
+                # Granularity violations (check in flow_state or regulators)
+                flow_state = hop.get('flow_state', {})
+                regulators = hop.get('regulators', {})
+                reg_decisions = regulators.get('decisions', [])
+                
+                for reg_decision in reg_decisions:
+                    if 'granularity' in reg_decision.get('regulator', '').lower():
+                        params = reg_decision.get('parameters', {})
+                        if params.get('granularity_violation', False):
+                            trace_has_violation = True
+                
+                # Also check in flow_state metadata
+                if flow_state.get('granularity_violation', False):
+                    trace_has_violation = True
+            
+            if trace_has_violation:
+                granularity_violations += 1
+            
+            # Early termination: questions with < 2 hops or very low average confidence
+            trace_confs = [hop.get('qa', {}).get('confidence', 0.5) for hop in trace.hops]
+            if trace.total_hops < 2 or (trace_confs and statistics.mean(trace_confs) < 0.4):
+                early_terminations += 1
+            
+            # Qualitative notes
+            if trace.em == 0.0 and trace.f1 < 0.3:
+                notes.append(f"Low performance: {trace.question[:50]}... (F1={trace.f1:.2f})")
+            elif trace.total_hops > 4:
+                notes.append(f"Long reasoning: {trace.question[:50]}... ({trace.total_hops} hops)")
+        
+        # Calculate metrics
+        conf_mean = statistics.mean(confidences) if confidences else 0.5
+        conf_var = statistics.variance(confidences) if len(confidences) > 1 else 0.0
+        
+        granularity_error_rate = granularity_violations / len(self.traces) if self.traces else 0.0
+        early_term_rate = early_terminations / len(self.traces) if self.traces else 0.0
+        avg_docs_per_hop = statistics.mean(docs_per_hop) if docs_per_hop else 0.0
+        
+        return {
+            'confidence_mean': conf_mean,
+            'confidence_variance': conf_var,
+            'granularity_error_rate': granularity_error_rate,
+            'avg_docs_per_hop': avg_docs_per_hop,
+            'early_termination_rate': early_term_rate,
+            'notes': notes[:5]  # Top 5 notes
+        }
     
     def _identify_failure_modes(self) -> Dict[str, Any]:
         """Identify common failure modes from traces."""
         failures = {
-            'low_entropy_issues': [],
-            'high_diffusion_issues': [],
+            'low_confidence_issues': [],  # ✅ EXPERIMENT 3: Renamed from low_entropy_issues
+            'high_diffusion_issues': [],  # ✅ EXPERIMENT 3: Kept for backward compatibility (will be empty)
             'anchor_rejection_issues': [],
             'convergence_issues': [],
             'query_transformation_issues': [],
@@ -639,25 +713,25 @@ class DiffusionDebugger:
                 for hop in trace.hops:
                     hop_num = hop.get('hop', 0)
                     
-                    # Check entropy
-                    entropy = hop.get('flow_state', {}).get('entropy', 0.0)
-                    if entropy < 0.1:
-                        failures['low_entropy_issues'].append({
+                    # ✅ EXPERIMENT 3: Check confidence instead of entropy
+                    confidence = hop.get('flow_state', {}).get('confidence', 0.5)
+                    if confidence < 0.3:
+                        failures['low_confidence_issues'].append({
                             'question': trace.question[:60],
                             'hop': hop_num,
-                            'entropy': entropy,
-                            'note': 'Entropy too low - may not trigger adaptive retrieval'
+                            'confidence': confidence,
+                            'note': 'Confidence too low - may indicate retrieval issues'
                         })
                     
-                    # Check diffusion
-                    diffusion = hop.get('flow_state', {}).get('diffusion', 0.0)
-                    if diffusion > 0.1:
-                        failures['high_diffusion_issues'].append({
-                            'question': trace.question[:60],
-                            'hop': hop_num,
-                            'diffusion': diffusion,
-                            'note': 'High diffusion - query may be unstable'
-                        })
+                    # ✅ EXPERIMENT 3: Removed diffusion check (always 0.0 now)
+                    # diffusion = hop.get('flow_state', {}).get('diffusion', 0.0)
+                    # if diffusion > 0.1:
+                    #     failures['high_diffusion_issues'].append({
+                    #         'question': trace.question[:60],
+                    #         'hop': hop_num,
+                    #         'diffusion': diffusion,
+                    #         'note': 'High diffusion - query may be unstable'
+                    #     })
                     
                     # Check anchor rejections
                     rejected = hop.get('anchors', {}).get('rejected', [])
@@ -713,12 +787,12 @@ class DiffusionDebugger:
         print("FAILURE MODE ANALYSIS")
         print("="*80)
         
-        # Low entropy issues
-        if failures['low_entropy_issues']:
-            print(f"\n⚠️  LOW ENTROPY ISSUES: {len(failures['low_entropy_issues'])} instances")
-            print("   Entropy < 0.1 may prevent adaptive retrieval from activating")
-            for issue in failures['low_entropy_issues'][:5]:
-                print(f"   - Hop {issue['hop']}: H(t)={issue['entropy']:.3f} - {issue['note']}")
+        # Low confidence issues
+        if failures['low_confidence_issues']:
+            print(f"\n⚠️  LOW CONFIDENCE ISSUES: {len(failures['low_confidence_issues'])} instances")
+            print("   Confidence < 0.3 may indicate retrieval issues")
+            for issue in failures['low_confidence_issues'][:5]:
+                print(f"   - Hop {issue['hop']}: Confidence={issue['confidence']:.3f} - {issue['note']}")
         
         # High diffusion issues
         if failures['high_diffusion_issues']:
@@ -1500,6 +1574,33 @@ async def debug_evaluate_dataset(dataset_name: str, num_examples: int = 5):
     with open(report_file, 'w') as f:
         json.dump(report, f, indent=2)
     
+    # ✅ Export to CSV for Google Sheets
+    csv_file = results_dir / f"diffusion_results_{timestamp}.csv"
+    with open(csv_file, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        
+        # Header
+        writer.writerow(['Question', 'Prediction', 'Ground_Truth', 'ExactMatch', 'F1Score', 'Hops'])
+        
+        # Data rows
+        for trace in report.get('traces', []):
+            question = trace.get('question', '')
+            prediction = trace.get('prediction', '').replace('\n', '  ')  # Clean newlines
+            ground_truth = trace.get('ground_truth', '')
+            em = trace.get('em', 0.0)
+            f1 = trace.get('f1', 0.0)
+            hops = trace.get('total_hops', 0)
+            
+            writer.writerow([question, prediction, ground_truth, f"{em:.4f}", f"{f1:.4f}", hops])
+        
+        # Summary row
+        writer.writerow([])
+        writer.writerow(['Summary', '', '', '', '', ''])
+        writer.writerow(['Exact Match', '', '', f"{report['summary']['avg_em']:.4f}", '', ''])
+        writer.writerow(['F1 Score', '', '', f"{report['summary']['avg_f1']:.4f}", '', ''])
+        writer.writerow(['Avg Hops', '', '', f"{report['summary']['avg_hops']:.2f}", '', ''])
+        writer.writerow(['Examples', '', '', f"{report['summary']['total_questions']}", '', ''])
+    
     print("\n" + "="*80)
     print("DEBUG REPORT SUMMARY")
     print("="*80)
@@ -1510,10 +1611,42 @@ async def debug_evaluate_dataset(dataset_name: str, num_examples: int = 5):
     print(f"Anchors Created: {report['summary']['total_anchors_created']}")
     print(f"Anchors Rejected: {report['summary']['total_anchors_rejected']}")
     
+    # Print regulator counts (for Google Sheets tracking)
+    print("\n" + "="*80)
+    print("REGULATOR FIRINGS (for Google Sheets)")
+    print("="*80)
+    reg_firings = report['statistics'].get('regulator_firings', {})
+    # ✅ FINAL: Optimal 3-regulator configuration (Granularity + Entity + Plan)
+    print(f"Granularity Regulator: {reg_firings.get('Granularity', 0)}")
+    print(f"Entity Regulator: {reg_firings.get('Entity', 0)}")
+    print(f"Plan Regulator: {reg_firings.get('Plan', 0)}")
+    print(f"\nNote: Final Configuration - 3 CORE regulators (Granularity + Entity + Plan)")
+    print(f"      PlanRegulator confirmed as CORE - increases stability/trajectory control")
+    print(f"      (fewer hops + fewer anchors + fewer catastrophic step drift cases)")
+    print(f"      Removed: EvidenceRegulator, RelationRegulator, ConfidenceRegulator (no benefit)")
+    
+    # Print additional metrics for Google Sheets
+    print("\n" + "="*80)
+    print("ADDITIONAL METRICS (for Google Sheets)")
+    print("="*80)
+    print(f"Confidence Mean: {report['summary'].get('confidence_mean', 0.0):.4f}")
+    print(f"Confidence Variance: {report['summary'].get('confidence_variance', 0.0):.4f}")
+    print(f"Granularity Error Rate: {report['summary'].get('granularity_error_rate', 0.0):.4f} ({report['summary'].get('granularity_error_rate', 0.0)*100:.1f}%)")
+    print(f"Avg Docs per Hop: {report['summary'].get('avg_docs_per_hop', 0.0):.2f}")
+    print(f"Early Termination Rate: {report['summary'].get('early_termination_rate', 0.0):.4f} ({report['summary'].get('early_termination_rate', 0.0)*100:.1f}%)")
+    print(f"\nQualitative Notes:")
+    notes = report['summary'].get('notes', [])
+    if notes:
+        for note in notes:
+            print(f"  - {note}")
+    else:
+        print("  - No significant notes")
+    
     # Print failure analysis
     debugger.print_failure_analysis()
     
     print(f"\n📄 Full debug report saved to: {report_file}")
+    print(f"📊 CSV results saved to: {csv_file}")
     
     return report
 

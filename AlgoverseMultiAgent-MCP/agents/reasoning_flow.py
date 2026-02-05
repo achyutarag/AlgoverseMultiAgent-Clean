@@ -109,19 +109,13 @@ class ReasoningFlowIndex:
         # NEW: Apply anchor corrections (potential wells)
         corrected_beliefs = self.apply_anchor_correction(beliefs.copy())
         
-        # NEW: Get entropy state from entropy tracker
-        entropy_state = None
-        if self.entropy_tracker:
-            # Update entropy tracker with corrected beliefs
-            previous_state = self.entropy_tracker.get_current_state()
-            entropy_state = self.entropy_tracker.update_entropy_state(
-                hop=hop,
-                entity_distribution=corrected_beliefs,
-                confidence=confidence,
-                previous_state=previous_state
-            )
+        # ✅ EXPERIMENT 3: Removed entropy tracking - using simple confidence instead
+        # entropy_state = None
+        # if self.entropy_tracker:
+        #     previous_state = self.entropy_tracker.get_current_state()
+        #     entropy_state = self.entropy_tracker.update_entropy_state(...)
         
-        # Create reasoning state with entropy integration
+        # Create reasoning state (without entropy integration)
         state = ReasoningState(
             hop=hop,
             beliefs=corrected_beliefs,  # Use corrected beliefs
@@ -129,9 +123,9 @@ class ReasoningFlowIndex:
             relation_direction=relation_direction,
             evidence_terms=(evidence_terms or []).copy(),
             plan_alignment=plan_alignment,
-            # NEW: Entropy integration
-            entropy=entropy_state.entropy if entropy_state else 0.0,
-            diffusion_coefficient=entropy_state.diffusion_coefficient if entropy_state else 0.0,
+            # ✅ EXPERIMENT 3: Removed entropy tracking - set to 0.0
+            entropy=0.0,
+            diffusion_coefficient=0.0,
             confidence=confidence
         )
         
@@ -139,8 +133,7 @@ class ReasoningFlowIndex:
         
         logger.debug(
             f"Hop {hop}: Added reasoning state with {len(corrected_beliefs)} beliefs, "
-            f"H(t)={state.entropy:.3f}, D(t)={state.diffusion_coefficient:.3f}, "
-            f"alignment={plan_alignment:.2f}"
+            f"confidence={confidence:.3f}, alignment={plan_alignment:.2f}"
         )
         
         return state
@@ -211,15 +204,8 @@ class ReasoningFlowIndex:
         if not current_state:
             return None
         
-        # Get entropy state for drift calculation
-        entropy_state = None
-        drift = 0.0
-        if self.entropy_tracker:
-            entropy_state = self.entropy_tracker.get_current_state()
-            if entropy_state:
-                previous_entropy = self.entropy_tracker.get_entropy_history()
-                if len(previous_entropy) >= 2:
-                    drift = entropy_state.drift_from_previous
+        # ✅ EXPERIMENT 3: Removed entropy tracking - no drift calculation
+        drift = 0.0  # Always 0.0 since entropy tracking removed
         
         # Build entity anchors dict from bucket anchors
         entity_anchors_dict = {}

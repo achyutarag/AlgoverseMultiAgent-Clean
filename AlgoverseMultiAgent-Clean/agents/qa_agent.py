@@ -28,9 +28,11 @@ class Answer(BaseModel):
 
 class QAAgent(BaseAgent):
     """
-    Enhanced QA Agent that synthesizes answers using in-context learning with 
+    QA Agent that synthesizes answers using in-context learning with 
     step-specific context. It produces responses for each step which are passed 
     to the next iteration, enabling grounded reasoning throughout the trajectory.
+    
+    Performs basic answer synthesis with no entropy-aware or diffusion-aware features.
     """
     
     def __init__(
@@ -182,40 +184,15 @@ Return JSON:
     
     async def process(self, input_data: Dict[str, Any]) -> AgentResponse:
         """
-        Generate a step-specific answer using entropy-aware compression in a stabilized belief field.
+        Generate a step-specific answer using basic in-context learning.
         
-        ====================================================================
-        DIFFUSION-TO-CONVERGENCE MODEL:
-        ====================================================================
-        Multi-hop reasoning is modeled as a diffusion process where beliefs
-        P(x,t) spread through document space. This QA agent performs the
-        compression step that collapses probability mass into anchors:
-        
-        P(x,t+1) = compress(P(x,t), anchors, H(t), D(t))
-        
-        Where:
-        - P(x,t): Belief distribution at hop t
-        - anchors: Fixed points (potential wells) from previous hops
-        - H(t): Entropy (uncertainty measure)
-        - D(t): Diffusion coefficient (drift measure)
-        
-        Compression Strategy:
-        - High entropy (H(t) > 0.5): Low compression → explore evidence broadly
-        - Low entropy (H(t) < 0.3) + high confidence: High compression → collapse to anchors
-        - Medium entropy: Balanced compression
-        
-        The output becomes new anchors for the next hop, completing the
-        diffusion → compression → anchor cycle.
-        ====================================================================
+        Performs simple answer synthesis from provided evidence with no entropy-aware
+        or diffusion-aware features.
         
         Args:
             input_data: Dictionary containing:
                 - 'question': The subquery to answer
                 - 'context': List of extracted passages with their sources and relevance
-                - 'flow_snapshot': FlowSnapshot with H(t), D(t), anchors, beliefs (NEW)
-                - 'regulator_constraints': List of regulator constraints (NEW)
-                - 'stabilized_query': The stabilized query used for retrieval (NEW)
-                - 'hop': Current hop number (NEW)
                 - Optional 'history': Previous interactions for context
                 - Optional 'step_context': Information about the current step
                 - Optional 'overall_query': The main question being answered
@@ -225,82 +202,18 @@ Return JSON:
                 
         Returns:
             AgentResponse containing:
-                - Synthesized answer (collapsed probability mass)
-                - New anchors for next hop
-                - Diffusion metadata (entropy, diffusion, anchor consistency)
+                - Synthesized answer
+                - Confidence score
+                - Supporting evidence and sources
         """
         question = input_data.get('question', '').strip()
         context = input_data.get('context', [])
-        flow_snapshot = input_data.get('flow_snapshot')
-        regulator_constraints = input_data.get('regulator_constraints', [])
-        stabilized_query = input_data.get('stabilized_query', '')
-        hop = input_data.get('hop', 1)
         history = input_data.get('history', [])
         step_context = input_data.get('step_context', {})
         overall_query = input_data.get('overall_query', '')
         previous_answers = input_data.get('previous_answers', {})
         max_history = int(input_data.get('max_history_items', 4))
         min_confidence = max(0.0, min(1.0, float(input_data.get('min_confidence', 0.0))))
-        
-        # ====================================================================
-        # ✅ EXPERIMENT 3: EXTRACT CONFIDENCE FROM FLOW SNAPSHOT
-        # ====================================================================
-        # Extract confidence and anchors (removed entropy/diffusion tracking)
-        # These determine the compression strategy
-        if flow_snapshot:
-            if isinstance(flow_snapshot, dict):
-                confidence = flow_snapshot.get('confidence', 0.5)
-                anchors = flow_snapshot.get('anchors', [])
-                entity_anchors = flow_snapshot.get('entity_anchors', {})
-            else:
-                # FlowSnapshot object
-                confidence = flow_snapshot.confidence if hasattr(flow_snapshot, 'confidence') else 0.5
-                anchors = flow_snapshot.anchors if hasattr(flow_snapshot, 'anchors') else []
-                entity_anchors = flow_snapshot.entity_anchors if hasattr(flow_snapshot, 'entity_anchors') else {}
-        else:
-            # Fallback if no flow_snapshot (backward compatibility)
-            confidence = 0.5
-            anchors = []
-            entity_anchors = {}
-        
-        # ====================================================================
-        # EXTRACT HIERARCHICAL LEVEL REQUIREMENT (Initial Condition)
-        # ====================================================================
-        # Extract hierarchical level requirement from GranularityRegulator constraint
-        # This is the initial condition (u(x,0)) that must be respected during compression
-        required_hierarchical_level = None
-        required_domain = None
-        for constraint in regulator_constraints:
-            constraint_dict = constraint if isinstance(constraint, dict) else constraint.dict() if hasattr(constraint, 'dict') else {}
-            constraint_name = constraint_dict.get('regulator_name', '')
-            if 'granularity' in constraint_name.lower():
-                params = constraint_dict.get('parameters', {})
-                required_level = params.get('required_level')
-                required_domain = params.get('required_domain')
-                if required_level:
-                    required_hierarchical_level = required_level
-                    break
-        
-        # ====================================================================
-        # ✅ EXPERIMENT 3: CONFIDENCE-BASED COMPRESSION DECISION
-        # ====================================================================
-        # Compression level determines how much to collapse probability mass:
-        # - High compression: High confidence → collapse to anchors
-        # - Medium compression: Moderate confidence → balanced approach
-        # - Low compression: Low confidence → explore evidence broadly
-        if confidence > 0.7:
-            compression_level = "high"
-            compression_strategy = "Collapse probability mass to most anchor-consistent answer. High precision, low exploration."
-        elif confidence > 0.4:
-            compression_level = "medium"
-            compression_strategy = "Balance anchor consistency with evidence exploration."
-        else:
-            compression_level = "low"
-            compression_strategy = "Explore evidence broadly while maintaining anchor consistency."
-        
-        logger.debug(
-            f"QA Agent (Hop {hop}): Confidence={confidence:.3f}, Compression={compression_level}"
-        )
         
         # Normalize question for consistent processing
         question = tokenization_utils.normalize_query(question)
@@ -347,11 +260,6 @@ Return JSON:
             prompt_lines.append(f"Question: {tokenization_utils.preprocess_llm_input(question)}")
             if overall_query:
                 prompt_lines.append(f"Overall question (context): {tokenization_utils.preprocess_llm_input(overall_query)}")
-            if required_hierarchical_level or required_domain:
-                prompt_lines.append(
-                    f"Required level: {required_hierarchical_level or 'unspecified'}; "
-                    f"domain: {required_domain or 'unspecified'}"
-                )
             prompt_lines.append("Evidence:")
             for i, doc in enumerate(context):
                 doc_id = doc.get('document_id', f'doc_{i+1}')
@@ -536,59 +444,9 @@ Return JSON:
                 self.conversation_history.append({"role": "user", "content": f"Q: {question}"})
                 self.conversation_history.append({"role": "assistant", "content": f"A: {answer.answer[:200]}..."})
                 
-                # ====================================================================
-                # GENERATE NEW ANCHORS FROM COMPRESSED ANSWER
-                # ====================================================================
-                # The answer is a collapsed probability mass - extract entities as new anchors
-                # These anchors will stabilize the next hop in the diffusion process
-                # ✅ FIX 2: Do NOT generate anchors from "unknown" (abstention, not entity)
-                new_anchors = []
-                answer_text = answer.answer
-                if answer_text and answer_text.lower().strip() != "unknown":
-                    import re
-                    # Extract potential entity names from answer (capitalized words/phrases)
-                    capitalized_entities = re.findall(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', answer_text)
-                    for entity in capitalized_entities[:2]:  # Top 2 entities
-                        # Filter out common words
-                        if entity not in ["The", "A", "An", "This", "That", "Yes", "No", "Unknown"]:
-                            new_anchors.append({
-                                "entity": entity,
-                                "type": "extracted_answer",
-                                "hop": hop,
-                                "confidence": answer.confidence,
-                                "source": "qa_compression"
-                            })
-                
-                # ====================================================================
-                # CALCULATE ANCHOR CONSISTENCY
-                # ====================================================================
-                # Measure how consistent the answer is with active anchors
-                # This is used by Final Assembler for convergence estimation
-                anchor_consistency = self._calculate_anchor_consistency(
-                    answer_text, anchors, entity_anchors
-                )
-                
-                # ====================================================================
-                # ENHANCE RESPONSE WITH DIFFUSION METADATA
-                # ====================================================================
-                # ✅ EXPERIMENT 3: Add metadata for Final Assembler (removed entropy/diffusion)
-                answer_dict = answer.model_dump()
-                answer_dict["diffusion_metadata"] = {
-                    "entropy": 0.0,  # Removed
-                    "diffusion_coefficient": 0.0,  # Removed
-                    "compression_level": compression_level,
-                    "compression_strategy": compression_strategy,
-                    "hop": hop,
-                    "new_anchors": new_anchors,
-                    "anchor_consistency": anchor_consistency,
-                    "stabilized_query": stabilized_query
-                }
-                
-                # ✅ EXPERIMENT 3: Removed entropy/diffusion tracking - set to 0.0
-                entropy = 0.0
-                diffusion = 0.0
-                
                 # Prepare metadata
+                answer_dict = answer.model_dump()
+                
                 metadata = {
                     "question": question,
                     "confidence": answer.confidence,
@@ -602,21 +460,16 @@ Return JSON:
                     "overall_query": overall_query,
                     "model": self.model_name,
                     "temperature": self.temperature,
-                    "qa_parameters": {                        "max_history": max_history,
+                    "qa_parameters": {
+                        "max_history": max_history,
                         "min_confidence": min_confidence,
                         "temperature": self.temperature
                     },
-                    "token_usage": token_usage,
-                    # ✅ DIFFUSION METADATA (for backward compatibility - always 0.0)
-                    "entropy": entropy,
-                    "diffusion": diffusion,
-                    "compression_level": compression_level,
-                    "new_anchors": new_anchors,
-                    "anchor_consistency": anchor_consistency
+                    "token_usage": token_usage
                 }
                 
                 # ✅ INFER SLOT AND EMIT SLOT-LABELED CANDIDATES
-                # Emit candidates from evidence even if answer = "unknown" (preserves diffusion)
+                # Emit candidates from evidence even if answer = "unknown"
                 slot = self._infer_slot(question, step_context)
                 
                 # Build evidence candidates (tentative hypotheses from evidence)
@@ -695,7 +548,7 @@ Return JSON:
                 metadata["abstained"] = (answer.answer.lower().strip() == "unknown")
                 
                 return AgentResponse(
-                    content=json.dumps(answer_dict),  # Include diffusion_metadata
+                    content=json.dumps(answer_dict),
                     metadata=metadata
                 )
                 
@@ -875,50 +728,3 @@ Return JSON:
             ]
             
             return fallback_questions[:num_questions]
-    
-    def _calculate_anchor_consistency(self, answer: str, anchors: List, entity_anchors: Dict) -> float:
-        """
-        Calculate how consistent the answer is with active anchors.
-        
-        ====================================================================
-        ANCHOR CONSISTENCY CALCULATION
-        ====================================================================
-        Anchors are fixed points (potential wells) that stabilize reasoning.
-        This method measures how well the answer aligns with these anchors.
-        
-        Returns:
-            Consistency score [0.0, 1.0]:
-            - 1.0: Answer perfectly aligns with all anchors
-            - 0.5: Neutral (no anchors or no alignment)
-            - 0.0: Answer contradicts anchors
-        ====================================================================
-        """
-        if not anchors and not entity_anchors:
-            return 0.5  # Neutral if no anchors
-        
-        answer_lower = answer.lower()
-        consistency_score = 0.0
-        total_anchors = 0
-        
-        # Check against entity anchors (most specific)
-        for entity, anchor_data in (entity_anchors.items() if isinstance(entity_anchors, dict) else []):
-            total_anchors += 1
-            if entity.lower() in answer_lower:
-                consistency_score += 1.0
-            # Also check if anchor_data contains the entity
-            if isinstance(anchor_data, str) and anchor_data.lower() in answer_lower:
-                consistency_score += 0.5
-        
-        # Check against bucket anchors
-        for anchor in (anchors if isinstance(anchors, list) else []):
-            anchor_entity = anchor.get('entity', '') if isinstance(anchor, dict) else (anchor.entity if hasattr(anchor, 'entity') else '')
-            if anchor_entity:
-                total_anchors += 1
-                if anchor_entity.lower() in answer_lower:
-                    consistency_score += 1.0
-        
-        # Normalize to [0.0, 1.0]
-        if total_anchors > 0:
-            return consistency_score / total_anchors
-        else:
-            return 0.5  # Neutral if no valid anchors
