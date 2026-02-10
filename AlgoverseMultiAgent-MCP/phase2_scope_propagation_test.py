@@ -2,12 +2,10 @@
 Phase 2 Scope Propagation Test
 
 Validates that breadcrumb_scope flows through StateManager to RetrieverAgent
-by checking for the audit logs emitted in RetrieverAgent.
+by checking behavior (ranking changes) rather than logs.
 """
 
 import asyncio
-import io
-import logging
 import os
 import sys
 
@@ -45,14 +43,7 @@ async def run_scope_propagation_test():
 
     state_manager = StateManager()
 
-    log_stream = io.StringIO()
-    handler = logging.StreamHandler(log_stream)
-    logger = logging.getLogger("agents.retriever_agent")
-    logger.setLevel(logging.INFO)
-    logger.addHandler(handler)
-
-    try:
-        _ = await state_manager.stabilize_and_retrieve(
+    with_scope = await state_manager.stabilize_and_retrieve(
             proposed_query="DLR headquarters NASA centers",
             hop=1,
             previous_answers={},
@@ -62,22 +53,35 @@ async def run_scope_propagation_test():
             total_steps=1,
             breadcrumb_scope=["NASA", "Centers"]
         )
-    finally:
-        logger.removeHandler(handler)
-
-    logs = log_stream.getvalue()
-
-    print("Captured audit logs:")
-    print(logs.strip() or "(no logs captured)")
-
-    assert "Structural Intent Detected" in logs, "Missing structural intent audit log"
-    assert "Retrieval pool expanded" in logs, "Missing retrieval pool expansion log"
-
-    print("✅ Scope propagation confirmed via audit logs")
+    
+    no_scope = await state_manager.stabilize_and_retrieve(
+            proposed_query="DLR headquarters NASA centers",
+            hop=1,
+            previous_answers={},
+            plan_goal="Find DLR headquarters",
+            retriever_agent=retriever,
+            current_step_index=0,
+            total_steps=1
+        )
+    
+    with_scope_docs = with_scope.get("documents", [])
+    no_scope_docs = no_scope.get("documents", [])
+    
+    assert with_scope_docs, "No documents returned with breadcrumb scope"
+    assert no_scope_docs, "No documents returned without breadcrumb scope"
+    
+    top_with_scope = with_scope_docs[0].get("metadata", {}).get("id")
+    top_no_scope = no_scope_docs[0].get("metadata", {}).get("id")
+    
+    print("Top doc with scope:", top_with_scope)
+    print("Top doc without scope:", top_no_scope)
+    
+    assert top_with_scope == "doc_match", "Expected scope-aware top document to be the breadcrumb match"
+    
+    print("✅ Scope propagation confirmed via ranking behavior")
 
 
 def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
     asyncio.run(run_scope_propagation_test())
 
 

@@ -17,7 +17,7 @@ class BaseAgent(ABC):
         self, 
         name: str, 
         model_config: Optional[Union[Dict[str, Any], LLMConfig]] = None,
-        model_name: str = "gemini-2.5-flash"  # Default model
+        model_name: str = "models/gemini-flash-lite-latest"  # Default model
     ):
         self.name = name
         self.model_name = model_name  # Store model name

@@ -25,7 +25,7 @@ class PlannerAgent(BaseAgent):
     def __init__(
         self, 
         model_config: Optional[Dict[str, Any]] = None,
-        model_name: str = "gemini-2.5-flash",  # LLM for complex planning
+        model_name: str = "models/gemini-flash-lite-latest",  # LLM for complex planning
         max_steps: int = 5
     ):
         """

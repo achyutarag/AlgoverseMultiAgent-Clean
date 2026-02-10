@@ -22,17 +22,20 @@ async def run_ab_diff():
     print("=" * 80)
 
     documents = [
+        # Doc A (The Trap) - high semantic similarity but wrong breadcrumb
         Document(
-            page_content="DLR headquarters is located in Cologne, Germany.",
-            metadata={"id": "doc_match", "breadcrumb_path": ["NASA", "Centers", "DLR"], "breadcrumb_confidence": 0.9}
+            page_content="DLR Headquarters is in Mexico.",
+            metadata={"id": "doc_trap", "breadcrumb_path": ["Mexico"], "breadcrumb_confidence": 0.9}
         ),
+        # Doc B (The Truth) - medium semantic similarity with correct breadcrumb
         Document(
-            page_content="Cologne is a city in Germany with a famous cathedral.",
-            metadata={"id": "doc_city", "breadcrumb_path": ["Germany", "Cities"], "breadcrumb_confidence": 0.7}
+            page_content="The HQ is located in Cologne.",
+            metadata={"id": "doc_truth", "breadcrumb_path": ["NASA", "Centers", "DLR"], "breadcrumb_confidence": 0.9}
         ),
+        # Doc C (The Noise) - low semantic similarity and unrelated breadcrumb
         Document(
-            page_content="Tamaulipas is a state in northeastern Mexico.",
-            metadata={"id": "doc_other", "breadcrumb_path": ["Mexico", "States"], "breadcrumb_confidence": 0.7}
+            page_content="DLR stands for German Aerospace Center.",
+            metadata={"id": "doc_noise", "breadcrumb_path": ["Glossary"], "breadcrumb_confidence": 0.7}
         )
     ]
 
@@ -70,8 +73,43 @@ async def run_ab_diff():
             meta = doc.get("metadata", {})
             print(f"{i}. id={meta.get('id')} score={doc.get('score', 0.0):.3f} breadcrumb={meta.get('breadcrumb_path')}")
 
+    async def compute_posteriors(scope):
+        docs_and_scores = retriever.vector_store.similarity_search_with_score(
+            query=query,
+            k=3
+        )
+        semantic_pairs = [(doc, 1.0 / (1.0 + score)) for doc, score in docs_and_scores]
+        reranked = retriever._bayesian_rerank_by_breadcrumb(
+            semantic_pairs,
+            breadcrumb_scope=scope,
+            heuristic_conf=0.62
+        )
+        return semantic_pairs, reranked
+
     print_results("A) No Scope", no_scope)
     print_results("B) With Scope", with_scope)
+
+    semantic_pairs, reranked = await compute_posteriors(["NASA", "Centers"])
+    print("\nPosterior Breakdown (scope=['NASA','Centers'])")
+    print("-" * 60)
+    for doc, posterior in reranked:
+        meta = doc.metadata or {}
+        chunk_breadcrumb = meta.get("breadcrumb_path", [])
+        match_level = retriever._calculate_breadcrumb_match_level(chunk_breadcrumb, ["NASA", "Centers"])
+        prior = retriever._calculate_structural_prior(
+            match_level,
+            meta.get("breadcrumb_confidence", 0.5),
+            heuristic_conf=0.62
+        )
+        semantic_score = next(
+            (score for d, score in semantic_pairs if d == doc),
+            0.0
+        )
+        print(
+            f"id={meta.get('id')} | semantic={semantic_score:.3f} | "
+            f"prior={prior:.3f} | posterior={posterior:.3f} | "
+            f"breadcrumb={chunk_breadcrumb}"
+        )
 
     print("\n✅ Compare ordering between A and B for Phase 2 verification")
 

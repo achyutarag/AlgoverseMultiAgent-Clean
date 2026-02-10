@@ -15,6 +15,11 @@ class SubQuery(BaseModel):
     purpose: str = Field(..., description="What this sub-query aims to accomplish")
     priority: int = Field(1, description="Priority level (1=highest)")
     context_needed: List[str] = Field(default_factory=list, description="Types of context needed for this sub-query")
+    breadcrumb_scope: Optional[List[str]] = Field(default_factory=list, description="Structural scope path")
+    scope_rationale: Optional[str] = Field(None, description="Why this scope was chosen")
+    structural_priority: Optional[float] = Field(None, description="Confidence in scope (0-1)")
+    entity_name: Optional[str] = Field(None, description="Entity anchor to preserve across hops")
+    target_type: Optional[str] = Field(None, description="Expected answer type (e.g., PERSON, ORG, LOC)")
 
 class StepDefinerAgent(BaseAgent):
     """
@@ -86,7 +91,7 @@ class StepDefinerAgent(BaseAgent):
     def __init__(
         self, 
         model_config: Optional[Dict[str, Any]] = None,
-        model_name: str = "gemini-2.5-flash",  # LLM for step definition
+        model_name: str = "models/gemini-flash-lite-latest",  # LLM for step definition
         max_subqueries: int = 3
     ):
         """
@@ -120,6 +125,13 @@ Guidelines for subquery generation:
 - Consider what types of documents or information sources would be most relevant
 - **CRITICAL: Avoid synthesis language** - DO NOT use words like "synthesize", "combine", "merge", "integrate", "assemble". Subqueries must be retrieval-focused questions, not synthesis instructions
 
+**Entity-Preserving Intent Parsing (CRITICAL):**
+- **Strict Entity Preservation:** Never replace a proper noun (e.g., "Miou-Miou") with a category (e.g., "Actress") in the subquery.
+- **Breadcrumb as Context, Not Replacement:** Use breadcrumb_scope only as structural context; keep the entity name in the query.
+- **Attribute Retention:** Preserve key descriptors from the question (e.g., "green performer") in the subquery.
+- **Emit entity_name:** If the target entity is known or inferable, include an exact entity_name field.
+- **Emit target_type (REQUIRED):** Every sub_query MUST include the expected answer type (PERSON/ORG/LOC/WORK/EVENT). If uncertain, choose the best guess.
+
 Return your response as a JSON object with this structure:
 {
     "step_id": "ID of the current step",
@@ -135,7 +147,9 @@ Return your response as a JSON object with this structure:
             "context_needed": ["factual", "statistical", "comparative"],
             "breadcrumb_scope": ["Level 1", "Level 2"],
             "scope_rationale": "Why this path was chosen",
-            "structural_priority": 0.85
+            "structural_priority": 0.85,
+            "entity_name": "Exact entity name if known (do NOT generalize)",
+            "target_type": "Expected answer type (PERSON/ORG/LOC/WORK/EVENT)"
         }
     ]
 }
@@ -162,6 +176,51 @@ Examples of good subquery generation:
 - Subquery 3: "How do Japan and South Korea differ in their trade policy approaches?"
 """
     
+    def _infer_target_type(self, text: str) -> Optional[str]:
+        lower = (text or "").lower()
+        if any(term in lower for term in ["who", "spouse", "person", "performer", "actor", "actress", "author", "writer", "singer"]):
+            return "PERSON"
+        if any(term in lower for term in ["where", "location", "country", "city", "state", "province", "headquarter", "headquarters", "hq", "based"]):
+            return "LOC"
+        if any(term in lower for term in ["organization", "company", "institution", "agency", "publisher", "label", "band"]):
+            return "ORG"
+        if any(term in lower for term in ["when", "year", "date", "era", "founded"]):
+            return "DATE"
+        if any(term in lower for term in ["book", "film", "movie", "song", "album", "novel", "series", "work"]):
+            return "WORK"
+        return None
+
+    def _infer_entity_name(
+        self,
+        step_description: str,
+        previous_answers: Dict[str, Any]
+    ) -> Optional[str]:
+        # Prefer entity names from previous answers if available
+        for _, answer in previous_answers.items():
+            if isinstance(answer, dict):
+                entity = answer.get("entity_name") or answer.get("entity")
+                if isinstance(entity, str) and entity.strip():
+                    return entity.strip()
+        # Heuristic: extract capitalized spans (proper nouns), allowing connectors
+        connector = r"(?:and|of|the|in|on|for|to|from|de|la|da|von)"
+        pattern = rf"\b([A-Z][A-Za-z]+(?:\s+(?:{connector}\s+)?[A-Z][A-Za-z]+)*)\b"
+        candidates = re.findall(pattern, step_description or "")
+        common = {"What", "Where", "When", "Who", "Which", "Find", "Locate", "Identify",
+                  "Determine", "Check", "Verify", "For", "The", "From", "To", "Step"}
+        candidates = [c for c in candidates if c not in common]
+        if not candidates:
+            return None
+        # Prefer the longest candidate (captures multi-token entities)
+        candidates.sort(key=lambda c: (-len(c.split()), -len(c)))
+        return candidates[0]
+
+    def _is_scope_aligned(self, breadcrumb_scope: List[str], step_description: str) -> bool:
+        if not breadcrumb_scope:
+            return False
+        scope_tokens = {t.lower() for t in breadcrumb_scope if isinstance(t, str)}
+        query_tokens = {t.lower() for t in re.findall(r"[A-Za-z]+", step_description or "")}
+        return bool(scope_tokens & query_tokens)
+
     async def process(self, input_data: Dict[str, Any]) -> AgentResponse:
         """
         Process the current step and generate detailed subqueries conditioned on context and history.
@@ -610,6 +669,30 @@ Return ONLY the JSON object, no other text."""
             # Add context_analysis if not present
             if "context_analysis" not in result:
                 result["context_analysis"] = "Analysis of relevant context from previous steps"
+
+            # Fallbacks: enforce breadcrumb_scope and target_type if missing
+            for sq in result["sub_queries"]:
+                if extracted_breadcrumb_scope and not sq.get("breadcrumb_scope"):
+                    if not self._is_scope_aligned(extracted_breadcrumb_scope, step_description):
+                        extracted_breadcrumb_scope = None
+                if extracted_breadcrumb_scope and not sq.get("breadcrumb_scope"):
+                    sq["breadcrumb_scope"] = extracted_breadcrumb_scope
+                    sq["scope_rationale"] = sq.get("scope_rationale") or "Inherited from previous step results"
+                    if sq.get("structural_priority") is None:
+                        sq["structural_priority"] = 0.5
+                if not sq.get("target_type"):
+                    inferred = self._infer_target_type(step_description)
+                    if inferred:
+                        sq["target_type"] = inferred
+                if not sq.get("entity_name"):
+                    inferred_entity = self._infer_entity_name(step_description, previous_answers)
+                    if inferred_entity:
+                        sq["entity_name"] = inferred_entity
+                if sq.get("entity_name"):
+                    entity = sq.get("entity_name", "")
+                    query_text = sq.get("query", "")
+                    if entity and isinstance(query_text, str) and entity.lower() not in query_text.lower():
+                        sq["query"] = f"{entity} {query_text}".strip()
             
             # Update history
             self._update_history("user", f"Define sub-queries for step: {step_id}")
@@ -622,7 +705,12 @@ Return ONLY the JSON object, no other text."""
                     query=sq["query"],
                     purpose=sq["purpose"],
                     priority=int(sq.get("priority", i + 1)),
-                    context_needed=sq.get("context_needed", ["factual"])
+                    context_needed=sq.get("context_needed", ["factual"]),
+                    breadcrumb_scope=sq.get("breadcrumb_scope", []),
+                    scope_rationale=sq.get("scope_rationale"),
+                    structural_priority=sq.get("structural_priority"),
+                    entity_name=sq.get("entity_name"),
+                    target_type=sq.get("target_type")
                 )
                 for i, sq in enumerate(result["sub_queries"])
             ]

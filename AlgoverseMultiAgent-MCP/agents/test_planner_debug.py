@@ -23,7 +23,7 @@ async def test_planner_debug():
         # First, let's test the LLM directly to see the original response
         print("🔧 Testing LLM directly...")
         llm_config = LLMConfig(
-            model_name="gemini-2.5-flash",
+            model_name="models/gemini-flash-lite-latest",
             model_type="google_gemini"
         )
         llm = get_llm(llm_config)

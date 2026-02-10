@@ -44,9 +44,9 @@ def test_gemini_api():
         
         # List available models
         print("\n📋 Listing available models...")
-        models = genai.list_models()
+        models = list(genai.list_models())
         
-        print(f"Found {len(list(models))} models:")
+        print(f"Found {len(models)} models:")
         print("-" * 30)
         
         for model in models:
@@ -57,10 +57,10 @@ def test_gemini_api():
                 print(f"   Methods: {model.supported_generation_methods}")
             print()
         
-        # Test with Gemini 2.5 Flash
-        print("🧪 Testing with gemini-2.5-flash...")
+        # Test with Gemini Flash Lite (latest)
+        print("🧪 Testing with models/gemini-flash-lite-latest...")
         
-        test_model = "gemini-2.5-flash"
+        test_model = "models/gemini-flash-lite-latest"
         
         try:
             print(f"🎯 Testing with model: {test_model}")

@@ -276,6 +276,15 @@ class RetrieverAgent(BaseAgent):
             # Apply Bayesian re-ranking by breadcrumb scope (if provided)
             if breadcrumb_scope:
                 logger.debug(f"🔄 Applying Bayesian re-ranking with breadcrumb scope: {breadcrumb_scope}")
+
+                # Debug: inspect candidates before reranking
+                logger.info("🔎 Pre-rerank candidates (top 50) with breadcrumb info:")
+                for idx, (doc, sim) in enumerate(docs_and_similarities[:50], start=1):
+                    meta = doc.metadata or {}
+                    path = meta.get("breadcrumb_path", [])
+                    match = self._calculate_breadcrumb_match_level(path, breadcrumb_scope)
+                    logger.info(f"  [{idx}] sim={sim:.3f} match={match:.2f} path={path}")
+
                 docs_and_similarities = self._bayesian_rerank_by_breadcrumb(
                     docs_and_similarities,
                     breadcrumb_scope,
@@ -541,8 +550,8 @@ class RetrieverAgent(BaseAgent):
         doc_scores = []  # Store (doc, combined_score, base_similarity) for re-ranking
         
         for doc, score in docs_and_scores:
-            # Convert score to similarity (higher is better)
-            base_similarity = 1.0 / (1.0 + score)
+            # Scores are already similarity values (higher is better)
+            base_similarity = float(score)
             
             # Skip if below threshold
             if base_similarity < min_similarity:

@@ -16,9 +16,10 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from agents.mixed_model_orchestrator import run_optimized_marag_pipeline
+from agents.musique_document_loader import load_musique_context_as_documents
 
 
-async def run_smoke_test(queries):
+async def run_smoke_test(queries, sleep_seconds, documents):
     print("\n" + "=" * 80)
     print("PHASE 2 SMOKE TEST")
     print("=" * 80)
@@ -28,7 +29,7 @@ async def run_smoke_test(queries):
         print(f"[{i}/{len(queries)}] Query: {query}")
         print("-" * 80)
         try:
-            result = await run_optimized_marag_pipeline(query)
+            result = await run_optimized_marag_pipeline(query, documents=documents)
             final_answer = getattr(result, "final_answer", None) or getattr(result, "content", None)
             confidence = getattr(result, "confidence", None)
 
@@ -41,6 +42,9 @@ async def run_smoke_test(queries):
             print("❌ Pipeline failed")
             print(f"Error: {exc}")
             raise
+        if sleep_seconds and i < len(queries):
+            print(f"⏳ Sleeping {sleep_seconds}s to avoid rate limits...")
+            await asyncio.sleep(sleep_seconds)
 
 
 def main():
@@ -55,6 +59,29 @@ def main():
         ],
         help="Queries to run through the pipeline"
     )
+    parser.add_argument(
+        "--sleep",
+        type=int,
+        default=0,
+        help="Seconds to sleep between queries (rate-limit friendly)"
+    )
+    parser.add_argument(
+        "--use-musique",
+        action="store_true",
+        help="Load MuSiQue dataset and use it as the retrieval corpus"
+    )
+    parser.add_argument(
+        "--musique-split",
+        type=str,
+        default="validation",
+        help="MuSiQue split to load (train/validation)"
+    )
+    parser.add_argument(
+        "--musique-examples",
+        type=int,
+        default=200,
+        help="Number of MuSiQue examples to load"
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -62,7 +89,16 @@ def main():
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
 
-    asyncio.run(run_smoke_test(args.queries))
+    documents = None
+    if args.use_musique:
+        print(f"Loading MuSiQue ({args.musique_split}) with {args.musique_examples} examples...")
+        documents = load_musique_context_as_documents(
+            dataset_split=args.musique_split,
+            num_examples=args.musique_examples
+        )
+        print(f"✅ Loaded {len(documents)} MuSiQue documents")
+
+    asyncio.run(run_smoke_test(args.queries, args.sleep, documents))
 
 
 if __name__ == "__main__":

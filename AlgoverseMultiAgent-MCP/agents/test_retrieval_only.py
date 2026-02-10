@@ -165,6 +165,12 @@ async def test_retrieval_only():
                         print(f"    ✅ Retrieved {num_docs} documents (avg similarity: {avg_similarity:.3f})")
                         if scores:
                             print(f"    📈 Score range: {min(scores):.3f} - {max(scores):.3f}")
+
+                        print("    📚 Top retrieved titles:")
+                        for doc in docs_retrieved[:10]:
+                            title = doc.get("metadata", {}).get("title", "Unknown")
+                            score = doc.get("score", 0.0)
+                            print(f"       - {title} (score={score:.3f})")
                         
                         # Show top 3 documents with relevance analysis
                         for i, doc in enumerate(docs_retrieved[:3]):

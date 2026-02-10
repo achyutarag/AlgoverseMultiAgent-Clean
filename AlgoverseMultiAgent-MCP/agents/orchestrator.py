@@ -366,6 +366,31 @@ class MARAGOrchestrator:
             f"hop={hop}, slot='{slot_id}'"
         )
         return False
+
+    def _is_answer_type_valid(self, answer: str, target_type: Optional[str]) -> bool:
+        """
+        Lightweight type validation gate to prevent category drift
+        (e.g., awarding 'Young Artist Award' for PERSON).
+        """
+        if not target_type or not answer:
+            return True
+        answer_l = answer.strip().lower()
+        target = target_type.strip().upper()
+
+        # Generic category words that are not entities
+        generic_roles = {"actress", "actor", "singer", "performer", "musician", "politician", "artist"}
+        non_person_keywords = {
+            "award", "prize", "festival", "band", "company", "city", "state", "province",
+            "river", "album", "film", "movie", "song", "book", "school", "university",
+            "magazine", "newspaper", "organization", "foundation", "committee", "station"
+        }
+
+        if target == "PERSON":
+            if answer_l in generic_roles:
+                return False
+            if any(k in answer_l for k in non_person_keywords):
+                return False
+        return True
     
     async def execute_pipeline(self, query: str, context: Optional[Dict[str, Any]] = None) -> PipelineResult:
         """
@@ -694,6 +719,23 @@ class MARAGOrchestrator:
             clean_subqueries = TokenizationUtils.strip_markdown_json(step_definer_response.content)
             subqueries_data = json.loads(clean_subqueries)
             subqueries = subqueries_data.get("sub_queries", [])
+            target_type = None
+            for sq in subqueries:
+                if sq.get("target_type"):
+                    target_type = sq.get("target_type")
+                    break
+            
+            # Fallback: infer target_type if missing
+            if not target_type:
+                step_desc = (step.get("description") or "").lower()
+                if any(term in step_desc for term in ["who", "spouse", "person", "performer", "actor", "actress"]):
+                    target_type = "PERSON"
+                elif any(term in step_desc for term in ["where", "location", "country", "city", "state", "province"]):
+                    target_type = "LOC"
+                elif any(term in step_desc for term in ["organization", "company", "institution", "agency"]):
+                    target_type = "ORG"
+                elif any(term in step_desc for term in ["when", "year", "date"]):
+                    target_type = "DATE"
             # Defensive clamp: if planner_mode demanded gather_context, ensure no answer-intent slips through
             if planner_mode == "gather_context":
                 forced = False
@@ -943,6 +985,22 @@ class MARAGOrchestrator:
             
             for subquery in subqueries:
                 try:
+                    # Entity-anchored hop retrieval (if provided)
+                    entity_name = subquery.get("entity_name")
+                    if not entity_name and previous_answers:
+                        # Pull the most recent answer as a fallback anchor
+                        last_answer = list(previous_answers.values())[-1]
+                        if isinstance(last_answer, dict):
+                            entity_name = last_answer.get("qa_result", {}).get("answer")
+                        elif isinstance(last_answer, str):
+                            entity_name = last_answer
+                        if entity_name:
+                            subquery["entity_name"] = entity_name
+                    if entity_name:
+                        query_text = subquery.get("query", "")
+                        if entity_name.lower() not in query_text.lower():
+                            subquery["query"] = f"{entity_name} {query_text}".strip()
+                            subquery["entity_anchor_added"] = True
                     retrieval_attempted = True
                     # Use diffusion-aware retrieval with stabilization
                     # Get main query from plan if plan_goal not provided
@@ -1288,6 +1346,18 @@ class MARAGOrchestrator:
 
             # Add logging to see gate decisions
             answer_preview = qa_result.get("answer", "")[:30] if isinstance(qa_result, dict) else ""
+
+            # Type-validation gate (prevents category drift)
+            if target_type and not self._is_answer_type_valid(qa_result.get("answer", ""), target_type):
+                gate_decision = {
+                    "decision": "needs_more_evidence",
+                    "reason": "type_mismatch"
+                }
+                logger.info(
+                    f"[Gate] Step {step.get('id', 'unknown')}: "
+                    f"decision=needs_more_evidence, reason=type_mismatch, "
+                    f"answer='{answer_preview}...', target_type={target_type}"
+                )
             logger.info(
                 f"[Gate] Step {step.get('id', 'unknown')}: "
                 f"decision={gate_decision.get('decision')}, "

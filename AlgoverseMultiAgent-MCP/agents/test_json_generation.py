@@ -31,7 +31,7 @@ async def test_json_generation():
         # Initialize extractor
         print("\n🔧 Initializing extractor...")
         extractor = ExtractorAgent(
-            model_name="gemini-2.5-flash",
+            model_name="models/gemini-flash-lite-latest",
             model_config={"use_cuda": False},
             temperature=0.1
         )

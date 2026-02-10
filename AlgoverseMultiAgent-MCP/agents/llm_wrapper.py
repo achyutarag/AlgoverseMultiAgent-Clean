@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class LLMConfig(BaseModel):
     """Configuration for LLM models."""
-    model_name: str = "gemini-2.5-flash"
+    model_name: str = "models/gemini-flash-lite-latest"
     model_type: str = "google_gemini"  # google_gemini, huggingface, etc.
     device: str = "auto"  # auto, cuda, cpu, mps
     temperature: float = 0.0  # deterministic by default
@@ -262,7 +262,7 @@ if __name__ == "__main__":
     
     # Example with Google Gemini model
     gemini_config = {
-        "model_name": "gemini-2.5-flash",
+        "model_name": "models/gemini-flash-lite-latest",
         "model_type": "google_gemini",
         "device": "auto",
         "temperature": 0.7,

@@ -24,7 +24,7 @@ async def test_llm_wrapper():
         # Initialize LLM wrapper
         print("🔧 Initializing LLM wrapper...")
         config = LLMConfig(
-            model_name="gemini-2.5-flash",
+            model_name="models/gemini-flash-lite-latest",
             model_config={"use_cuda": False}
         )
         llm = GoogleGeminiLLM(config)

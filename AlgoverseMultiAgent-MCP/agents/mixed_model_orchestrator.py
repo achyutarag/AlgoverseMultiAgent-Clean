@@ -34,12 +34,12 @@ class MixedModelOrchestrator(MARAGOrchestrator):
         
         # SLM models for retrieval and extraction   #for multihop reasoning, 
         retrieval_model: str = "all-MiniLM-L6-v2",
-        extraction_model: str = "gemini-2.5-flash",
+        extraction_model: str = "models/gemini-flash-lite-latest",
         
         # LLM models for reasoning tasks
-        planning_model: str = "gemini-2.5-flash",
-        step_definition_model: str = "gemini-2.5-flash", 
-        qa_model: str = "gemini-2.5-flash",
+        planning_model: str = "models/gemini-flash-lite-latest",
+        step_definition_model: str = "models/gemini-flash-lite-latest", 
+        qa_model: str = "models/gemini-flash-lite-latest",
         
         # Model configurations
         slm_config: Optional[Dict[str, Any]] = None,
@@ -251,9 +251,9 @@ class MixedModelOrchestrator(MARAGOrchestrator):
 async def create_optimized_marag_pipeline(
     retrieval_model: str = "all-MiniLM-L6-v2",
     extraction_model: str = "distilbert-base-uncased",
-    planning_model: str = "gemini-2.5-flash",
-    step_definition_model: str = "gemini-2.5-flash",
-    qa_model: str = "gemini-2.5-flash",
+    planning_model: str = "models/gemini-flash-lite-latest",
+    step_definition_model: str = "models/gemini-flash-lite-latest",
+    qa_model: str = "models/gemini-flash-lite-latest",
     **kwargs
 ) -> MixedModelOrchestrator:
     """
@@ -283,9 +283,9 @@ async def run_optimized_marag_pipeline(
     query: str,
     retrieval_model: str = "all-MiniLM-L6-v2",
     extraction_model: str = "distilbert-base-uncased", 
-    planning_model: str = "gemini-2.5-flash",
-    step_definition_model: str = "gemini-2.5-flash",
-    qa_model: str = "gemini-2.5-flash",
+    planning_model: str = "models/gemini-flash-lite-latest",
+    step_definition_model: str = "models/gemini-flash-lite-latest",
+    qa_model: str = "models/gemini-flash-lite-latest",
     context: Optional[Dict[str, Any]] = None,
     **kwargs
 ) -> PipelineResult:

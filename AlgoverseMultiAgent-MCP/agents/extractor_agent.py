@@ -34,7 +34,7 @@ class ExtractorAgent(BaseAgent):
     def __init__(
         self, 
         model_config: Optional[Dict[str, Any]] = None,
-        model_name: str = "gemini-2.5-flash",  # LLM for extraction
+        model_name: str = "models/gemini-flash-lite-latest",  # LLM for extraction
         temperature: float = 0.0,
         max_tokens: int = 2048
     ):

@@ -25,7 +25,7 @@ async def debug_qa_agent():
         # Initialize QA agent
         print("🔧 Initializing QA agent...")
         qa_agent = QAAgent(
-            model_name="gemini-2.5-flash",
+            model_name="models/gemini-flash-lite-latest",
             model_config={"use_cuda": False},
             temperature=0.1
         )
